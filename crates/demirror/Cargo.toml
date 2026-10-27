@@ -1,0 +1,19 @@
+[package]
+name = "demirror"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+eframe = "0.37.0"
+mdns-sd = "0.21.6"
+qrcode = { version = "0.14.1", default-features = false }
+serde_json = "1.0.154"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+tungstenite = "0.30.0"
+ureq = { version = "3.5.0", default-features = false, features = ["json"] }
+vmon-proto = { version = "0.1.0", path = "../vmon-proto" }
+vmon-server = { version = "0.1.0", path = "../vmon-server" }
+zune-jpeg = "0.5.15"

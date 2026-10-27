@@ -1,0 +1,13 @@
+[Unit]
+Description=demirror virtual display daemon (VKMS)
+After=systemd-modules-load.service
+
+[Service]
+# install-linux.sh adds `--user NAME` for each user allowed to create displays.
+ExecStart=/usr/local/bin/vmon-vdisplayd run @USERS@
+Restart=on-failure
+RuntimeDirectory=demirror
+RuntimeDirectoryPreserve=no
+
+[Install]
+WantedBy=multi-user.target

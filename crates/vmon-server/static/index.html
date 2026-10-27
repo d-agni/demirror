@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101215">
+<title>demirror</title>
+<style>
+  :root {
+    --bg: #f4f5f8; --panel: #ffffff; --text: #16181d; --muted: #646b78; --border: #dfe2e8;
+    --accent: #2563eb; --accent-text: #ffffff; --danger: #c62828; --ok: #1b873f; --warn: #a15c00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101215; --panel: #1a1d22; --text: #e8eaee; --muted: #9aa1ad; --border: #2c3038;
+      --accent: #4c8dff; --accent-text: #0b0d10; --danger: #ff6b6b; --ok: #4cc77a; --warn: #f0b04c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 980px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  header h1 { font-size: 22px; margin: 0; }
+  .status { margin-left: auto; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); }
+  h2 { font-size: 13px; margin: 0 0 12px; color: var(--muted); font-weight: 600;
+       text-transform: uppercase; letter-spacing: .05em; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+            padding: 20px; margin-bottom: 20px; }
+  .hero { display: grid; grid-template-columns: 1fr auto; gap: 16px 24px; align-items: center; }
+  .hero h2 { margin: 0 0 4px; }
+  .hero p { margin: 0; color: var(--muted); }
+  .hero .size { font-size: 28px; font-weight: 700; color: var(--text); margin: 4px 0; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 1 / -1; }
+  .presets button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  button, a.button { font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    border-radius: 8px; padding: 8px 14px; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary, a.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.big { font-size: 17px; padding: 14px 22px; border-radius: 10px; }
+  button.danger { color: var(--danger); }
+  details summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+  input, select { font: inherit; color: var(--text); background: var(--bg);
+                  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+  .actions { display: flex; gap: 8px; align-items: end; }
+  .monitors { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .card { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
+  .card img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: contain; background: #000; }
+  .card .body { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .card .meta { color: var(--muted); font-size: 13px; }
+  .card .row { display: flex; gap: 8px; }
+  .badge { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border);
+           color: var(--muted); margin-left: 6px; vertical-align: 2px; }
+  .empty { color: var(--muted); margin: 0; }
+  .error { color: var(--danger); margin: 10px 0 0; min-height: 1.5em; }
+  .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+  @media (max-width: 560px) { .hero { grid-template-columns: 1fr; } .hero button.big { width: 100%; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>demirror</h1>
+    <span class="status"><span class="dot" id="svc-dot"></span><span id="svc-text">Checking…</span></span>
+  </header>
+
+  <section class="hero">
+    <div>
+      <h2>Use this device as a monitor</h2>
+      <p>The host's desktop extends onto this screen, like a second monitor.</p>
+      <div class="size" id="device-size">…</div>
+      <p id="device-detail"></p>
+    </div>
+    <button class="primary big" id="go">Start monitor</button>
+    <div class="presets" role="group" aria-label="Quality">
+      <button data-preset="smooth">Smooth · 60 fps</button>
+      <button data-preset="balanced">Balanced · 30 fps</button>
+      <button data-preset="sharp">Sharp · 30 fps, best quality</button>
+      <button data-preset="saver">Data saver · 15 fps</button>
+    </div>
+    <p class="error" id="go-error" style="grid-column: 1 / -1"></p>
+  </section>
+
+  <section>
+    <h2>Monitors on this host</h2>
+    <div class="monitors" id="monitors"><p class="empty">No monitors yet.</p></div>
+  </section>
+
+  <section>
+    <details>
+      <summary>More options: other sources, a fixed size</summary>
+      <form id="create">
+        <label>Name <input name="name" placeholder="optional"></label>
+        <label>Source <select name="source"></select></label>
+        <label>Size
+          <select name="size">
+            <option value="device">This device's screen</option>
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="2560x1440">2560 × 1440</option>
+            <option value="1280x720">1280 × 720</option>
+            <option value="1024x768">1024 × 768</option>
+          </select>
+        </label>
+        <label>FPS <input name="fps" type="number" min="1" max="120" value="30"></label>
+        <label>Quality <input name="quality" type="number" min="1" max="100" value="75"></label>
+        <div class="actions">
+          <button class="primary" type="submit">Create</button>
+          <button type="button" id="create-view">Create &amp; open</button>
+        </div>
+      </form>
+      <p class="error" id="error"></p>
+    </details>
+  </section>
+</main>
+<script>
+const token = new URLSearchParams(location.search).get('token');
+const withToken = (url) => token ? `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : url;
+const $ = (s) => document.querySelector(s);
+
+const PRESETS = {
+  smooth: { fps: 60, quality: 70 },
+  balanced: { fps: 30, quality: 75 },
+  sharp: { fps: 30, quality: 90 },
+  saver: { fps: 15, quality: 55 },
+};
+let preset = 'balanced';
+try { preset = localStorage.getItem('demirror.preset') || preset; } catch {}
+if (!PRESETS[preset]) preset = 'balanced';
+
+let sources = null;
+
+async function api(method, path, body) {
+  const res = await fetch(withToken(path), {
+    method, headers: body ? { 'content-type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+  return res.status === 204 ? null : res.json();
+}
+
+/** This screen in device pixels, in its current orientation. */
+function deviceSize() {
+  const dpr = window.devicePixelRatio || 1;
+  let w = Math.round(screen.width * dpr), h = Math.round(screen.height * dpr);
+  // Some browsers report the portrait size whatever the orientation.
+  const landscape = matchMedia('(orientation: landscape)').matches;
+  if (landscape !== (w >= h)) [w, h] = [h, w];
+  return { width: w, height: h, dpr };
+}
+
+function showDevice() {
+  const d = deviceSize();
+  $('#device-size').textContent = `${d.width} × ${d.height}`;
+  $('#device-detail').textContent = `Detected from this screen (${d.dpr === 1 ? 'standard' : d.dpr + '×'} pixel density). The monitor follows when you rotate or resize.`;
+}
+
+function showPresets() {
+  for (const b of document.querySelectorAll('[data-preset]'))
+    b.setAttribute('aria-pressed', String(b.dataset.preset === preset));
+}
+
+async function loadSources() {
+  try {
+    sources = await api('GET', '/api/sources');
+  } catch (e) {
+    $('#svc-dot').className = 'dot warn';
+    $('#svc-text').textContent = `Host unreachable: ${e.message}`;
+    return;
+  }
+  $('#svc-dot').className = sources.virtual_available ? 'dot ok' : 'dot warn';
+  $('#svc-text').textContent = sources.virtual_available ? 'Virtual displays ready' : 'Virtual displays unavailable';
+  $('#svc-text').title = sources.virtual_detail;
+  $('#go').disabled = !sources.virtual_available;
+  $('#go-error').textContent = sources.virtual_available ? '' : `This host can't add a display: ${sources.virtual_detail}`;
+
+  const select = document.forms.create.source;
+  select.innerHTML = '';
+  const virt = new Option('New virtual display (extends desktop)', 'virtual');
+  virt.disabled = !sources.virtual_available;
+  select.add(virt);
+  select.add(new Option('Test pattern', 'synthetic'));
+  if (sources.can_create_outputs) select.add(new Option('New display (command)', 'screen:'));
+  for (const o of sources.outputs)
+    select.add(new Option(`Mirror screen ${o.name} (${o.width}×${o.height})`, 'screen:' + o.name));
+  select.value = sources.virtual_available ? 'virtual' : 'synthetic';
+}
+
+async function start() {
+  $('#go-error').textContent = '';
+  $('#go').disabled = true;
+  $('#go').textContent = 'Starting…';
+  // Full screen first: browsers only allow it straight after a tap.
+  const el = document.documentElement;
+  await (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el).catch(() => {});
+  try {
+    const size = deviceSize();
+    const name = /Android|iPhone|iPad/.test(navigator.userAgent) ? (navigator.userAgent.match(/Android|iPhone|iPad/)[0] + ' screen') : 'This screen';
+    const info = await api('POST', '/api/monitors', {
+      name, width: size.width, height: size.height, ...PRESETS[preset], source: { kind: 'virtual' },
+    });
+    location.href = withToken(`/view/${info.id}?own=1`);
+  } catch (e) {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    $('#go-error').textContent = e.message;
+    $('#go').disabled = false;
+    $('#go').textContent = 'Start monitor';
+  }
+}
+
+function readSpec() {
+  const f = document.forms.create;
+  let width, height;
+  if (f.size.value === 'device') ({ width, height } = deviceSize());
+  else [width, height] = f.size.value.split('x').map(Number);
+  const source = f.source.value === 'synthetic' ? { kind: 'synthetic' }
+    : f.source.value === 'virtual' ? { kind: 'virtual' }
+    : { kind: 'screen', output: f.source.value.slice(7) || null };
+  return { name: f.name.value || null, width, height, fps: +f.fps.value, quality: +f.quality.value, source };
+}
+
+async function create(open) {
+  $('#error').textContent = '';
+  try {
+    const info = await api('POST', '/api/monitors', readSpec());
+    if (open) location.href = withToken(`/view/${info.id}`);
+    else refresh();
+  } catch (e) { $('#error').textContent = e.message; }
+}
+
+/** One still frame for a card's thumbnail. */
+function thumbnail(id, img) {
+  const ws = new WebSocket(withToken(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/monitors/${id}`));
+  ws.binaryType = 'blob';
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') return;
+    const url = URL.createObjectURL(e.data);
+    img.onload = () => URL.revokeObjectURL(url);
+    img.src = url;
+    ws.close();
+  };
+  setTimeout(() => ws.close(), 5000);
+}
+
+const KIND = { synthetic: 'test pattern', virtual: 'virtual display', screen: 'mirror' };
+let tick = 0;
+
+async function refresh() {
+  let monitors;
+  try { monitors = await api('GET', '/api/monitors'); } catch { return; }
+  const list = $('#monitors');
+  const ids = new Set(monitors.map((m) => m.id));
+  for (const card of [...list.querySelectorAll('.card')])
+    if (!ids.has(+card.dataset.id)) card.remove();
+  for (const m of monitors) {
+    let card = list.querySelector(`.card[data-id="${m.id}"]`);
+    const fresh = !card;
+    if (fresh) {
+      card = document.createElement('div');
+      card.className = 'card'; card.dataset.id = m.id;
+      card.innerHTML = `<img alt=""><div class="body"><div><strong></strong><span class="badge"></span></div><span class="meta"></span>
+        <div class="row"><a class="button primary">Open</a><button class="danger">Close</button></div></div>`;
+      card.querySelector('a').href = withToken(`/view/${m.id}`);
+      card.querySelector('button').onclick = async () => { await api('DELETE', `/api/monitors/${m.id}`).catch(() => {}); refresh(); };
+      list.append(card);
+    }
+    // Thumbnails refresh every 10 s.
+    if (fresh || tick % 5 === 0) thumbnail(m.id, card.querySelector('img'));
+    card.querySelector('strong').textContent = m.name;
+    card.querySelector('.badge').textContent = KIND[m.source.kind] ?? m.source.kind;
+    card.querySelector('.meta').textContent =
+      `${m.width} × ${m.height} · ${m.fps} fps · ${m.viewers} viewer${m.viewers === 1 ? '' : 's'}`;
+  }
+  const empty = list.querySelector('.empty');
+  if (monitors.length && empty) empty.remove();
+  if (!monitors.length && !empty) list.innerHTML = '<p class="empty">No monitors yet. Start one above, from any phone, tablet or computer on this network.</p>';
+  tick++;
+}
+
+for (const b of document.querySelectorAll('[data-preset]'))
+  b.onclick = () => {
+    preset = b.dataset.preset;
+    try { localStorage.setItem('demirror.preset', preset); } catch {}
+    showPresets();
+  };
+$('#go').onclick = start;
+$('#create').onsubmit = (e) => { e.preventDefault(); create(false); };
+$('#create-view').onclick = () => create(true);
+addEventListener('resize', showDevice);
+showDevice();
+showPresets();
+loadSources();
+refresh();
+setInterval(refresh, 2000);
+setInterval(loadSources, 15000);
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=demirror
+GenericName=Virtual Monitors
+Comment=Turn phones, tablets and other computers into extra monitors
+Exec=demirror
+Icon=video-display
+Terminal=false
+Categories=Utility;System;
+Keywords=monitor;display;screen;tablet;second screen;
+StartupWMClass=demirror

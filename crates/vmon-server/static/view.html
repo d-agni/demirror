@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>demirror monitor</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #e8eaee;
+         touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #bar { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 8px; align-items: center;
+         padding: max(8px, env(safe-area-inset-top)) 16px 8px; background: rgba(0, 0, 0, .7); transition: opacity .3s; }
+  #bar.hidden { opacity: 0; pointer-events: none; }
+  #bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #bar button, #bar a { font: inherit; color: inherit; background: rgba(255, 255, 255, .14); border: 0;
+         border-radius: 7px; padding: 7px 12px; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  #bar button.danger { background: rgba(255, 90, 90, .25); }
+  #status { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+            padding: 24px; color: #9aa1ad; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<div id="status">Connecting…</div>
+<div id="bar">
+  <span id="title">demirror</span>
+  <button id="fullscreen">Full screen</button>
+  <a id="back" href="/">Monitors</a>
+  <button id="disconnect" class="danger" hidden>Disconnect</button>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+const token = params.get('token');
+const own = params.get('own') === '1';
+const withToken = (url) => token ? `${url}?token=${encodeURIComponent(token)}` : url;
+const id = location.pathname.split('/').pop();
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+const title = document.getElementById('title');
+const bar = document.getElementById('bar');
+document.getElementById('back').href = withToken('/');
+
+let info = null, frames = 0, fps = 0, decoding = false, pending = null, closing = false;
+
+setInterval(() => {
+  fps = frames; frames = 0;
+  if (info) title.textContent = `${info.name} · ${canvas.width}×${canvas.height} · ${fps} fps`;
+}, 1000);
+
+// Decode one frame at a time; if frames arrive faster, keep only the newest.
+async function show(blob) {
+  if (decoding) { pending = blob; return; }
+  decoding = true;
+  try {
+    const bitmap = await createImageBitmap(blob);
+    if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+      canvas.width = bitmap.width; canvas.height = bitmap.height;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    frames++;
+  } catch { /* skip a corrupt frame */ }
+  decoding = false;
+  if (pending) { const next = pending; pending = null; show(next); }
+}
+
+// A virtual display follows this screen: rotating, resizing the window, full screen.
+let lastSize = '';
+let sizeTimer;
+function followSize() {
+  if (!info || info.source.kind !== 'virtual') return;
+  clearTimeout(sizeTimer);
+  sizeTimer = setTimeout(() => {
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.round(innerWidth * dpr), height = Math.round(innerHeight * dpr);
+    const key = `${width}x${height}`;
+    if (key === lastSize || width < 16 || height < 16) return;
+    lastSize = key;
+    fetch(withToken(`/api/monitors/${id}/size`), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ width, height }),
+    }).catch(() => {});
+  }, 800);
+}
+addEventListener('resize', followSize);
+screen.orientation?.addEventListener('change', followSize);
+
+function connect() {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(withToken(`${scheme}://${location.host}/ws/monitors/${id}`));
+  ws.binaryType = 'blob';
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      info = JSON.parse(e.data);
+      document.title = info.name;
+      followSize();
+      return;
+    }
+    status.textContent = '';
+    show(e.data);
+  };
+  ws.onclose = async () => {
+    if (closing) return;
+    const res = await fetch(withToken(`/api/monitors/${id}`)).catch(() => null);
+    if (res && res.status === 404) { status.textContent = 'This monitor was closed.'; return; }
+    status.textContent = 'Connection lost, reconnecting…';
+    setTimeout(connect, 1000);
+  };
+}
+
+function toggleFullscreen() {
+  if (document.fullscreenElement || document.webkitFullscreenElement)
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  else (document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)
+    ?.call(document.documentElement).catch(() => {});
+}
+document.getElementById('fullscreen').onclick = toggleFullscreen;
+canvas.addEventListener('dblclick', toggleFullscreen);
+
+// A monitor started from this device is closed with it.
+const disconnect = document.getElementById('disconnect');
+disconnect.hidden = !own;
+disconnect.onclick = async () => {
+  closing = true;
+  status.textContent = 'Disconnecting…';
+  await fetch(withToken(`/api/monitors/${id}`), { method: 'DELETE' }).catch(() => {});
+  if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+  location.href = withToken('/');
+};
+
+// Keep the screen on while it's a monitor.
+let wakeLock = null;
+async function keepAwake() {
+  if (document.visibilityState !== 'visible' || !navigator.wakeLock) return;
+  wakeLock = await navigator.wakeLock.request('screen').catch(() => null);
+}
+document.addEventListener('visibilitychange', keepAwake);
+
+// The toolbar fades while the monitor is in use; tap or move to bring it back.
+let hideTimer;
+function wake() {
+  bar.classList.remove('hidden');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => bar.classList.add('hidden'), 3000);
+}
+['pointermove', 'pointerdown', 'keydown'].forEach((t) => addEventListener(t, wake));
+wake();
+keepAwake();
+connect();
+</script>
+</body>
+</html>
