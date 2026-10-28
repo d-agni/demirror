@@ -385,7 +385,7 @@ VOID EvtIoControl(WDFDEVICE, WDFREQUEST request, size_t, size_t, ULONG code) {
     size_t written = 0;
     switch (code) {
     case IOCTL_DEMIRROR_VERSION: {
-        UINT32* out;
+        UINT32* out = nullptr;
         status = WdfRequestRetrieveOutputBuffer(request, sizeof(UINT32), (PVOID*)&out, nullptr);
         if (NT_SUCCESS(status)) {
             *out = DEMIRROR_IDD_VERSION;
@@ -394,8 +394,8 @@ VOID EvtIoControl(WDFDEVICE, WDFREQUEST request, size_t, size_t, ULONG code) {
         break;
     }
     case IOCTL_DEMIRROR_ADD: {
-        DEMIRROR_SIZE* in;
-        UINT32* out;
+        DEMIRROR_SIZE* in = nullptr;
+        UINT32* out = nullptr;
         status = Input(request, &in);
         if (NT_SUCCESS(status)) {
             status = WdfRequestRetrieveOutputBuffer(request, sizeof(UINT32), (PVOID*)&out, nullptr);
@@ -412,7 +412,7 @@ VOID EvtIoControl(WDFDEVICE, WDFREQUEST request, size_t, size_t, ULONG code) {
     }
     case IOCTL_DEMIRROR_REMOVE:
     case IOCTL_DEMIRROR_PING: {
-        UINT32* id;
+        UINT32* id = nullptr;
         status = Input(request, &id);
         if (NT_SUCCESS(status)) {
             status = code == IOCTL_DEMIRROR_REMOVE ? RemoveMonitor(*id) : PingMonitor(*id);
@@ -420,7 +420,7 @@ VOID EvtIoControl(WDFDEVICE, WDFREQUEST request, size_t, size_t, ULONG code) {
         break;
     }
     case IOCTL_DEMIRROR_RESIZE: {
-        DEMIRROR_RESIZE* in;
+        DEMIRROR_RESIZE* in = nullptr;
         status = Input(request, &in);
         if (NT_SUCCESS(status)) {
             status = ResizeMonitor(*in);
