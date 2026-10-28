@@ -17,8 +17,8 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 tungstenite = "0.30.0"
 ureq = { version = "3.5.0", default-features = false, features = ["json"] }
-vmon-proto = { version = "0.1.0", path = "../vmon-proto" }
-vmon-server = { version = "0.1.0", path = "../vmon-server" }
+vmon-proto = { version = "0.2.0", path = "../vmon-proto" }
+vmon-server = { version = "0.2.0", path = "../vmon-server" }
 zune-jpeg = "0.5.15"
 
 [build-dependencies]
