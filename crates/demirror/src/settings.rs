@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+pub use vmon_proto::Placement;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Preset {
@@ -53,10 +54,45 @@ impl Preset {
     }
 }
 
+/// Extend the host's desktop onto this screen, or show one of its screens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mode {
+    Extend,
+    Mirror,
+}
+
+/// How big things look on the monitor: fewer pixels, shown bigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Zoom {
+    Normal,
+    Larger,
+    Largest,
+}
+
+impl Zoom {
+    pub const ALL: [(Zoom, &'static str); 3] = [(Zoom::Normal, "Normal"), (Zoom::Larger, "Larger"), (Zoom::Largest, "Largest")];
+
+    pub fn factor(self) -> f64 {
+        match self {
+            Zoom::Normal => 1.0,
+            Zoom::Larger => 1.5,
+            Zoom::Largest => 2.0,
+        }
+    }
+}
+
+/// How a monitor is sized from the screen it's shown on: the preset's longest side, and
+/// the text size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sizing {
+    pub max_side: u32,
+    pub zoom: Zoom,
+}
+
 /// A monitor's size for a screen of `size` pixels: the same shape, the longest side at most
-/// `max_side`, the width a multiple of 8 (rounded down).
-pub fn fit([w, h]: [u32; 2], max_side: u32) -> [u32; 2] {
-    let scale = (max_side as f64 / w.max(h).max(1) as f64).min(1.0);
+/// `max_side`, divided by the zoom, the width a multiple of 8 (rounded down).
+pub fn fit([w, h]: [u32; 2], sizing: Sizing) -> [u32; 2] {
+    let scale = (sizing.max_side as f64 / w.max(h).max(1) as f64).min(1.0) / sizing.zoom.factor();
     let width = ((w as f64 * scale / 8.0).floor() as u32 * 8).max(8);
     let height = ((h as f64 * scale / 2.0).round() as u32 * 2).max(2);
     [width, height]
@@ -75,6 +111,9 @@ pub struct Settings {
     pub address: String,
     pub host_token: String,
     pub preset: Preset,
+    pub mode: Mode,
+    pub zoom: Zoom,
+    pub placement: Placement,
 }
 
 impl Default for Settings {
@@ -89,11 +128,18 @@ impl Default for Settings {
             address: String::new(),
             host_token: String::new(),
             preset: Preset::Balanced,
+            mode: Mode::Extend,
+            zoom: Zoom::Normal,
+            placement: Placement::Right,
         }
     }
 }
 
 impl Settings {
+    pub fn sizing(&self) -> Sizing {
+        Sizing { max_side: self.preset.max_side(), zoom: self.zoom }
+    }
+
     /// What the server was started with that a restart would change: port, token, announced.
     pub fn server_key(&self) -> (u16, Option<String>, bool) {
         let token = self.require_token.then(|| self.token.trim().to_string()).filter(|t| !t.is_empty());
@@ -265,6 +311,14 @@ pub fn ui(ui: &mut egui::Ui, settings: &mut Settings, sharing_with: Option<&(u16
         crate::widgets::section(ui, "About");
         ui.label(format!("demirror {}", env!("CARGO_PKG_VERSION")));
         ui.label(egui::RichText::new("Virtual monitors for phones, tablets and other computers.").weak());
+        if let Some(log) = crate::log_path() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("Log: {}", log.display())).small().weak());
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(log.display().to_string());
+                }
+            });
+        }
     });
 
     changes
@@ -276,16 +330,24 @@ mod tests {
 
     #[test]
     fn monitors_keep_the_screens_shape() {
-        assert_eq!(fit([1080, 2400], 1920), [864, 1920], "a phone held upright");
-        assert_eq!(fit([2400, 1080], 1920), [1920, 864]);
-        assert_eq!(fit([1920, 1080], 1920), [1920, 1080], "small enough already");
-        assert_eq!(fit([1366, 768], 2560), [1360, 768], "never larger, width a multiple of 8");
-        assert_eq!(fit([2560, 1600], Preset::Saver.max_side()), [1280, 800]);
+        let max = |max_side| Sizing { max_side, zoom: Zoom::Normal };
+        assert_eq!(fit([1080, 2400], max(1920)), [864, 1920], "a phone held upright");
+        assert_eq!(fit([2400, 1080], max(1920)), [1920, 864]);
+        assert_eq!(fit([1920, 1080], max(1920)), [1920, 1080], "small enough already");
+        assert_eq!(fit([1366, 768], max(2560)), [1360, 768], "never larger, width a multiple of 8");
+        assert_eq!(fit([2560, 1600], max(Preset::Saver.max_side())), [1280, 800]);
+    }
+
+    #[test]
+    fn larger_text_means_fewer_pixels() {
+        assert_eq!(fit([1920, 1080], Sizing { max_side: 1920, zoom: Zoom::Largest }), [960, 540]);
+        assert_eq!(fit([1080, 2400], Sizing { max_side: 1920, zoom: Zoom::Larger }), [576, 1280]);
     }
 
     #[test]
     fn old_settings_still_load() {
         let s: Settings = serde_json::from_str(r#"{"port": 9000}"#).unwrap();
         assert_eq!((s.port, s.preset, s.allow_input), (9000, Preset::Balanced, true));
+        assert_eq!((s.mode, s.zoom, s.placement), (Mode::Extend, Zoom::Normal, Placement::Right));
     }
 }

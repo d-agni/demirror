@@ -33,8 +33,13 @@
   .hero h2 { margin: 0 0 4px; }
   .hero p { margin: 0; color: var(--muted); }
   .hero .size { font-size: 28px; font-weight: 700; color: var(--text); margin: 4px 0; }
-  .presets { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 1 / -1; }
-  .presets button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .presets, .choices { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .presets { grid-column: 1 / -1; }
+  .presets button[aria-pressed="true"], .choices button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .options { grid-column: 1 / -1; display: grid; grid-template-columns: max-content 1fr; gap: 10px 14px; align-items: center; }
+  .options > span { font-size: 13px; color: var(--muted); }
+  .options [hidden] { display: none; }
+  @media (max-width: 560px) { .options { grid-template-columns: 1fr; gap: 4px; } .options > span { margin-top: 8px; } }
   button, a.button { font: inherit; border: 1px solid var(--border); background: var(--bg); color: var(--text);
     border-radius: 8px; padding: 8px 14px; cursor: pointer; text-decoration: none; white-space: nowrap; }
   button:disabled { opacity: .5; cursor: default; }
@@ -71,7 +76,7 @@
   <section class="hero">
     <div>
       <h2>Use this device as a monitor</h2>
-      <p>The host's desktop extends onto this screen, like a second monitor.</p>
+      <p id="mode-detail">The host's desktop extends onto this screen, like a second monitor.</p>
       <div class="size" id="device-size">…</div>
       <p id="device-detail"></p>
     </div>
@@ -81,6 +86,28 @@
       <button data-preset="balanced">Balanced · 30 fps</button>
       <button data-preset="sharp">Sharp · 30 fps, best quality</button>
       <button data-preset="saver">Data saver · 15 fps</button>
+    </div>
+    <div class="options">
+      <span>Mode</span>
+      <div class="choices" id="mode">
+        <button data-value="extend" title="A new screen next to the host's: more room">Extend</button>
+        <button data-value="mirror" title="Show a screen the host already has">Mirror</button>
+        <select id="mirror-screen" aria-label="Screen to mirror" hidden></select>
+      </div>
+      <span>Text size</span>
+      <div class="choices" id="zoom">
+        <button data-value="1" title="Everything as sharp and small as this screen allows">Normal</button>
+        <button data-value="1.5">Larger</button>
+        <button data-value="2">Largest</button>
+      </div>
+      <span id="place-label" hidden>Position</span>
+      <div class="choices" id="place" hidden>
+        <button data-value="left">Left</button>
+        <button data-value="right">Right</button>
+        <button data-value="above">Above</button>
+        <button data-value="below">Below</button>
+        <span class="note" style="margin:0">of the host's main screen</span>
+      </div>
     </div>
     <p class="error" id="go-error" style="grid-column: 1 / -1"></p>
   </section>
@@ -151,14 +178,51 @@ function deviceSize() {
   // Some browsers report the portrait size whatever the orientation.
   const landscape = matchMedia('(orientation: landscape)').matches;
   if (landscape !== (w >= h)) [w, h] = [h, w];
-  const scale = Math.min(dpr, (MAX_SIDE[preset] || 1920) / Math.max(w, h));
+  // Larger text: fewer pixels, shown bigger.
+  const scale = Math.min(dpr, (MAX_SIDE[preset] || 1920) / Math.max(w, h)) / zoom;
   return { width: Math.floor(w * scale / 8) * 8, height: Math.round(h * scale / 2) * 2, dpr };
 }
 
+const stored = (key, fallback) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
+const store = (key, value) => { try { localStorage.setItem(key, value); } catch {} };
+let mode = stored('demirror.mode', 'extend');
+let zoom = Number(stored('demirror.zoom', '1')) || 1;
+let place = stored('demirror.place', 'right');
+
+/** A row of buttons, one pressed: `value` is the pressed one's data-value. */
+function choices(id, value, changed) {
+  const buttons = [...document.querySelectorAll(`#${id} button`)];
+  const show = (v) => buttons.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.value === String(v))));
+  buttons.forEach((b) => b.addEventListener('click', () => { show(b.dataset.value); changed(b.dataset.value); }));
+  show(value);
+}
+
+/** The host screen chosen to mirror, if any. */
+function mirrored() {
+  return sources?.outputs.find((o) => o.name === $('#mirror-screen').value) ?? sources?.outputs[0];
+}
+
 function showDevice() {
+  const mirror = mode === 'mirror';
   const d = deviceSize();
-  $('#device-size').textContent = `${d.width} × ${d.height}`;
-  $('#device-detail').textContent = `Fits this screen (the preset sets the sharpness). The monitor follows when you rotate or resize.`;
+  const m = mirrored();
+  $('#device-size').textContent = mirror ? (m ? `${m.width} × ${m.height}` : '—') : `${d.width} × ${d.height}`;
+  $('#mode-detail').textContent = mirror
+    ? "This screen shows one of the host's screens, the same picture on both."
+    : "The host's desktop extends onto this screen, like a second monitor.";
+  $('#device-detail').textContent = mirror
+    ? (m ? `The host's screen ${m.name}, scaled to fit.` : 'The host has no screens demirror can mirror.')
+    : 'Fits this screen (the preset sets the sharpness, text size how big things are). The monitor follows when you rotate or resize.';
+  $('#mirror-screen').hidden = !mirror;
+  const placeable = !mirror && !!sources?.can_place;
+  $('#place').hidden = $('#place-label').hidden = !placeable;
+  if (sources) {
+    const ok = mirror ? !!m : sources.virtual_available;
+    $('#go').disabled = !ok;
+    $('#go-error').textContent = ok ? ''
+      : mirror ? 'The host has no screens demirror can mirror.'
+      : `This host can't add a display: ${sources.virtual_detail}`;
+  }
 }
 
 function showPresets() {
@@ -177,8 +241,12 @@ async function loadSources() {
   $('#svc-dot').className = sources.virtual_available ? 'dot ok' : 'dot warn';
   $('#svc-text').textContent = sources.virtual_available ? 'Virtual displays ready' : 'Virtual displays unavailable';
   $('#svc-text').title = sources.virtual_detail;
-  $('#go').disabled = !sources.virtual_available;
-  $('#go-error').textContent = sources.virtual_available ? '' : `This host can't add a display: ${sources.virtual_detail}`;
+  const screens = $('#mirror-screen');
+  const chosen = screens.value || stored('demirror.mirror', '');
+  screens.innerHTML = '';
+  for (const o of sources.outputs) screens.add(new Option(`${o.name} (${o.width}×${o.height})`, o.name));
+  if (sources.outputs.some((o) => o.name === chosen)) screens.value = chosen;
+  showDevice();
 
   const select = document.forms.create.source;
   select.innerHTML = '';
@@ -200,11 +268,13 @@ async function start() {
   const el = document.documentElement;
   await (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el).catch(() => {});
   try {
-    const size = deviceSize();
-    const name = /Android|iPhone|iPad/.test(navigator.userAgent) ? (navigator.userAgent.match(/Android|iPhone|iPad/)[0] + ' screen') : 'This screen';
-    const info = await api('POST', '/api/monitors', {
-      name, width: size.width, height: size.height, ...PRESETS[preset], source: { kind: 'virtual' },
-    });
+    const device = /Android|iPhone|iPad/.test(navigator.userAgent) ? navigator.userAgent.match(/Android|iPhone|iPad/)[0] : 'This device';
+    const m = mirrored();
+    const spec = mode === 'mirror'
+      ? { name: `${device} (mirror)`, width: m.width, height: m.height, source: { kind: 'screen', output: m.name } }
+      : { name: `${device} screen`, ...deviceSize(), source: { kind: 'virtual' }, placement: place };
+    delete spec.dpr;
+    const info = await api('POST', '/api/monitors', { ...spec, ...PRESETS[preset] });
     location.href = withToken(`/view/${info.id}?own=1`);
   } catch (e) {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -293,6 +363,10 @@ for (const b of document.querySelectorAll('[data-preset]'))
 $('#go').onclick = start;
 $('#create').onsubmit = (e) => { e.preventDefault(); create(false); };
 $('#create-view').onclick = () => create(true);
+choices('mode', mode, (v) => { mode = v; store('demirror.mode', v); showDevice(); });
+choices('zoom', zoom, (v) => { zoom = Number(v); store('demirror.zoom', v); showDevice(); });
+choices('place', place, (v) => { place = v; store('demirror.place', v); });
+$('#mirror-screen').onchange = () => { store('demirror.mirror', $('#mirror-screen').value); showDevice(); };
 addEventListener('resize', showDevice);
 showDevice();
 showPresets();

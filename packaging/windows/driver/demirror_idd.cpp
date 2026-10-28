@@ -2,8 +2,8 @@
 //
 // demirror asks it, through IOCTLs (protocol.h), for a monitor of the viewing device's size.
 // The driver plugs one in, Windows extends the desktop onto it like onto any new monitor, and
-// demirror captures it like any other screen. The driver itself only keeps the monitor's
-// frames flowing; the pixels go to the viewer through demirror.
+// the frames Windows draws for it are copied into shared memory, where demirror reads them
+// and streams them to the viewing device.
 //
 // Monitors are made to measure: each offers exactly the size it was asked for. They go away
 // when demirror removes them or stops pinging them (it quit or crashed).
@@ -21,10 +21,14 @@
 #include <IddCx.h>
 #include <dxgi1_5.h>
 #include <d3d11_2.h>
+#include <sddl.h>
 #include <wrl/client.h>
+
+#include <cstdio>
 
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include "protocol.h"
@@ -35,12 +39,65 @@ namespace {
 
 const UINT REFRESH_HZ = 60;
 
+// A monitor's frames for demirror: shared memory (protocol.h), kept alive by the monitor and
+// by the thread that writes it.
+class SharedFrame {
+public:
+    // Big enough for a `width` x `height` monitor in either orientation.
+    SharedFrame(UINT32 id, UINT32 width, UINT32 height) {
+        const UINT64 side = width > height ? width : height;
+        const UINT64 capacity = side * side * 4;
+        const UINT64 size = DEMIRROR_FRAME_PIXELS + capacity;
+        // demirror runs as the signed-in user; the driver as Local Service.
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:P(A;;GA;;;SY)(A;;GA;;;LS)(A;;GR;;;IU)(A;;GR;;;BA)", SDDL_REVISION_1, &sd, nullptr)) {
+            return;
+        }
+        SECURITY_ATTRIBUTES attributes = {sizeof(attributes), sd, FALSE};
+        wchar_t name[64];
+        swprintf_s(name, DEMIRROR_FRAME_NAME, id);
+        m_section = CreateFileMappingW(INVALID_HANDLE_VALUE, &attributes, PAGE_READWRITE, (DWORD)(size >> 32),
+                                       (DWORD)size, name);
+        LocalFree(sd);
+        if (m_section) {
+            m_frame = (DEMIRROR_FRAME*)MapViewOfFile(m_section, FILE_MAP_WRITE, 0, 0, 0);
+        }
+        if (m_frame) {
+            m_frame->Capacity = (UINT32)capacity;
+        }
+    }
+
+    ~SharedFrame() {
+        if (m_frame) {
+            UnmapViewOfFile(m_frame);
+        }
+        if (m_section) {
+            CloseHandle(m_section);
+        }
+    }
+
+    SharedFrame(const SharedFrame&) = delete;
+    SharedFrame& operator=(const SharedFrame&) = delete;
+
+    // Null if the section couldn't be made.
+    DEMIRROR_FRAME* Frame() const {
+        return m_frame;
+    }
+
+private:
+    HANDLE m_section = nullptr;
+    DEMIRROR_FRAME* m_frame = nullptr;
+};
+
 // Keeps a monitor's swap chain moving: Windows waits for each frame to be taken before it
 // draws the next, so without this the desktop on the monitor would stop updating.
 class Worker {
 public:
-    Worker(IDDCX_SWAPCHAIN chain, HANDLE available, ComPtr<ID3D11Device> device)
-        : m_chain(chain), m_available(available), m_device(std::move(device)) {
+    Worker(IDDCX_SWAPCHAIN chain, HANDLE available, ComPtr<ID3D11Device> device, std::shared_ptr<SharedFrame> shared)
+        : m_chain(chain), m_available(available), m_device(std::move(device)), m_shared(std::move(shared)),
+          m_frame(m_shared ? m_shared->Frame() : nullptr) {
+        m_device->GetImmediateContext(&m_context);
         m_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         m_thread = CreateThread(nullptr, 0, Run, this, 0, nullptr);
     }
@@ -92,8 +149,8 @@ private:
             if (FAILED(hr)) {
                 return; // abandoned: a mode change, or the monitor is gone
             }
-            // demirror reads the desktop back through Windows, so the frame isn't needed here.
             if (buffer.MetaData.pSurface) {
+                Publish(buffer.MetaData.pSurface);
                 buffer.MetaData.pSurface->Release();
             }
             if (FAILED(IddCxSwapChainFinishedProcessingFrame(m_chain))) {
@@ -105,9 +162,65 @@ private:
         }
     }
 
+    // Copies the frame into the shared memory, for demirror.
+    void Publish(IDXGIResource* surface) {
+        if (!m_frame) {
+            return;
+        }
+        ComPtr<ID3D11Texture2D> texture;
+        if (FAILED(surface->QueryInterface(IID_PPV_ARGS(&texture)))) {
+            return;
+        }
+        D3D11_TEXTURE2D_DESC desc;
+        texture->GetDesc(&desc);
+        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) {
+            return; // HDR and other formats aren't streamed
+        }
+        const UINT64 row = (UINT64)desc.Width * 4;
+        if (row * desc.Height > m_frame->Capacity) {
+            return;
+        }
+        if (!m_staging || m_stagingSize != std::make_pair(desc.Width, desc.Height)) {
+            D3D11_TEXTURE2D_DESC staging = {};
+            staging.Width = desc.Width;
+            staging.Height = desc.Height;
+            staging.MipLevels = 1;
+            staging.ArraySize = 1;
+            staging.Format = desc.Format;
+            staging.SampleDesc.Count = 1;
+            staging.Usage = D3D11_USAGE_STAGING;
+            staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            m_staging.Reset();
+            if (FAILED(m_device->CreateTexture2D(&staging, nullptr, &m_staging))) {
+                return;
+            }
+            m_stagingSize = {desc.Width, desc.Height};
+        }
+        m_context->CopyResource(m_staging.Get(), texture.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (FAILED(m_context->Map(m_staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+            return;
+        }
+        BYTE* pixels = (BYTE*)m_frame + DEMIRROR_FRAME_PIXELS;
+        InterlockedIncrement64(&m_frame->Sequence); // odd: being written
+        m_frame->Width = desc.Width;
+        m_frame->Height = desc.Height;
+        for (UINT y = 0; y < desc.Height; y++) {
+            memcpy(pixels + y * row, (const BYTE*)mapped.pData + (UINT64)y * mapped.RowPitch, (size_t)row);
+        }
+        m_frame->Frames++;
+        InterlockedIncrement64(&m_frame->Sequence); // even: done
+        m_context->Unmap(m_staging.Get(), 0);
+    }
+
     IDDCX_SWAPCHAIN m_chain;
     HANDLE m_available;
     ComPtr<ID3D11Device> m_device;
+    ComPtr<ID3D11DeviceContext> m_context;
+    ComPtr<ID3D11Texture2D> m_staging;
+    std::pair<UINT, UINT> m_stagingSize;
+    std::shared_ptr<SharedFrame> m_shared;
+    DEMIRROR_FRAME* m_frame;
     HANDLE m_stop = nullptr;
     HANDLE m_thread = nullptr;
 };
@@ -120,6 +233,8 @@ struct Monitor {
     ULONGLONG pinged = 0;
     IDDCX_MONITOR object = nullptr;
     BYTE edid[128] = {};
+    std::shared_ptr<SharedFrame> shared;
+    // Declared last: stops before the rest goes.
     std::unique_ptr<Worker> worker;
 };
 
@@ -255,6 +370,7 @@ NTSTATUS AddMonitor(const DEMIRROR_SIZE& size, UINT32* id) {
         added->height = size.Height;
         added->pinged = GetTickCount64();
         MakeEdid(added->edid, connector + 1);
+        added->shared = std::make_shared<SharedFrame>(added->id, size.Width, size.Height);
         m = added.get();
         g_monitors.push_back(std::move(added));
         adapter = g_adapter;
@@ -337,6 +453,10 @@ NTSTATUS ResizeMonitor(const DEMIRROR_RESIZE& resize) {
         std::lock_guard<std::mutex> lock(g_lock);
         for (auto& m : g_monitors) {
             if (m->id == resize.Id) {
+                const DEMIRROR_FRAME* frame = m->shared ? m->shared->Frame() : nullptr;
+                if (frame && (UINT64)resize.Width * resize.Height * 4 > frame->Capacity) {
+                    return STATUS_INVALID_PARAMETER; // bigger than its frames can be
+                }
                 m->width = resize.Width;
                 m->height = resize.Height;
                 object = m->object;
@@ -511,10 +631,12 @@ HRESULT RenderDevice(LUID luid, ComPtr<ID3D11Device>& device) {
 
 NTSTATUS EvtMonitorAssignSwapChain(IDDCX_MONITOR object, const IDARG_IN_SETSWAPCHAIN* in) {
     std::unique_ptr<Worker> old;
+    std::shared_ptr<SharedFrame> shared;
     {
         std::lock_guard<std::mutex> lock(g_lock);
         if (Monitor* m = ByObject(object)) {
             old = std::move(m->worker);
+            shared = m->shared;
         }
     }
     old.reset();
@@ -525,7 +647,7 @@ NTSTATUS EvtMonitorAssignSwapChain(IDDCX_MONITOR object, const IDARG_IN_SETSWAPC
         WdfObjectDelete((WDFOBJECT)in->hSwapChain);
         return STATUS_SUCCESS;
     }
-    auto worker = std::make_unique<Worker>(in->hSwapChain, in->hNextSurfaceAvailable, device);
+    auto worker = std::make_unique<Worker>(in->hSwapChain, in->hNextSurfaceAvailable, device, shared);
     {
         std::lock_guard<std::mutex> lock(g_lock);
         if (Monitor* m = ByObject(object)) {

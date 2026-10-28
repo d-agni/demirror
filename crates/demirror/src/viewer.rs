@@ -52,12 +52,12 @@ pub struct Viewer {
     sent_size: Option<[u32; 2]>,
     new_size: Option<([u32; 2], Instant)>,
     /// The longest side the monitor may have (the quality preset's).
-    max_side: u32,
+    sizing: crate::settings::Sizing,
     active_at: Instant,
 }
 
 impl Viewer {
-    pub fn open(target: Target, id: u32, own: bool, max_side: u32, ctx: &egui::Context) -> Result<Viewer> {
+    pub fn open(target: Target, id: u32, own: bool, sizing: crate::settings::Sizing, ctx: &egui::Context) -> Result<Viewer> {
         let (info, mut socket) = target.connect(id)?;
         // Short reads, so the same thread also sends input without waiting for a frame.
         if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
@@ -110,7 +110,7 @@ impl Viewer {
             since: Instant::now(),
             sent_size: None,
             new_size: None,
-            max_side,
+            sizing,
             active_at: Instant::now(),
         })
     }
@@ -216,7 +216,7 @@ impl Viewer {
             return;
         }
         let ppp = ctx.pixels_per_point();
-        let size = crate::settings::fit([(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32], self.max_side);
+        let size = crate::settings::fit([(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32], self.sizing);
         if size[0] < 16 || size[1] < 16 || Some(size) == self.sent_size {
             self.new_size = None;
             return;

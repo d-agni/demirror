@@ -12,7 +12,7 @@ use vmon_proto::{MonitorInfo, MonitorSpec, SourceSpec};
 use crate::{
     host::ViewRequest,
     net::{self, FoundHost, Target},
-    settings::{self, Preset, Settings},
+    settings::{self, Mode, Placement, Preset, Settings, Zoom},
     widgets,
 };
 
@@ -65,15 +65,45 @@ impl Connect {
         widgets::card(ui, |ui| {
             widgets::section(ui, "Picture");
             ui.add_space(4.0);
-            widgets::segmented(ui, &mut settings.preset, &Preset::ALL.map(|p| (p, p.label())));
-            ui.label(RichText::new(settings.preset.detail()).small().weak());
+            egui::Grid::new("picture").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
+                ui.label("Mode");
+                ui.vertical(|ui| {
+                    widgets::segmented(ui, &mut settings.mode, &[(Mode::Extend, "Extend"), (Mode::Mirror, "Mirror")]);
+                    ui.label(RichText::new(match settings.mode {
+                        Mode::Extend => "A new screen beside the other computer's: more room.",
+                        Mode::Mirror => "Shows the other computer's main screen, the same picture on both.",
+                    }).small().weak());
+                });
+                ui.end_row();
+                ui.label("Quality");
+                ui.vertical(|ui| {
+                    widgets::segmented(ui, &mut settings.preset, &Preset::ALL.map(|p| (p, p.label())));
+                    ui.label(RichText::new(settings.preset.detail()).small().weak());
+                });
+                ui.end_row();
+                if settings.mode == Mode::Extend {
+                    ui.label("Text size");
+                    widgets::segmented(ui, &mut settings.zoom, &Zoom::ALL);
+                    ui.end_row();
+                    ui.label("Position");
+                    ui.vertical(|ui| {
+                        let places = [(Placement::Left, "Left"), (Placement::Right, "Right"), (Placement::Above, "Above"), (Placement::Below, "Below")];
+                        widgets::segmented(ui, &mut settings.placement, &places);
+                        ui.label(RichText::new("Of the other computer's main screen (Windows; elsewhere its display settings decide).").small().weak());
+                    });
+                    ui.end_row();
+                }
+            });
             ui.add_space(6.0);
-            match screen {
-                Some(size) => {
-                    let [w, h] = settings::fit(size, settings.preset.max_side());
+            match (settings.mode, screen) {
+                (Mode::Mirror, _) => {
+                    ui.label("The picture is scaled to fit this screen.");
+                }
+                (Mode::Extend, Some(size)) => {
+                    let [w, h] = settings::fit(size, settings.sizing());
                     ui.label(format!("This screen is {} × {}: the monitor will be {w} × {h}, and follows the window's size.", size[0], size[1]));
                 }
-                None => {
+                (Mode::Extend, None) => {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         ui.label("Measuring this screen…");
@@ -165,20 +195,22 @@ impl Connect {
         }
         let enabled = self.starting.is_none() && screen.is_some() && !address.trim().is_empty();
         if widgets::primary_button(ui, "Start monitor", enabled).clicked() {
-            let size = settings::fit(screen.unwrap_or([1920, 1080]), settings.preset.max_side());
-            self.start_at(address, token, size, settings.preset, ui.ctx());
+            let size = settings::fit(screen.unwrap_or([1920, 1080]), settings.sizing());
+            self.start_at(address, token, size, settings, ui.ctx());
         }
     }
 
     /// Starts a monitor on the address and token in `settings` (`--connect … --start`).
     pub fn start(&mut self, screen: [u32; 2], settings: &Settings, ctx: &egui::Context) {
-        let size = settings::fit(screen, settings.preset.max_side());
-        self.start_at(&settings.address, &settings.host_token, size, settings.preset, ctx);
+        let size = settings::fit(screen, settings.sizing());
+        self.start_at(&settings.address, &settings.host_token, size, settings, ctx);
     }
 
-    fn start_at(&mut self, address: &str, token: &str, [width, height]: [u32; 2], preset: Preset, ctx: &egui::Context) {
+    /// Starts a monitor of `size` (extending) or a mirror of the host's main screen.
+    fn start_at(&mut self, address: &str, token: &str, [width, height]: [u32; 2], settings: &Settings, ctx: &egui::Context) {
         self.error = None;
-        let (address, token, (fps, quality)) = (address.to_string(), token.to_string(), preset.fps_quality());
+        let (address, token, (fps, quality)) = (address.to_string(), token.to_string(), settings.preset.fps_quality());
+        let (mode, placement) = (settings.mode, settings.placement);
         let (done, starting) = mpsc::channel();
         self.starting = Some((address.clone(), starting));
         let ctx = ctx.clone();
@@ -186,11 +218,25 @@ impl Connect {
             let result = (|| {
                 let target = Target::parse(&address, &token)?;
                 let sources = target.sources()?;
-                if !sources.virtual_available {
-                    bail!("That computer can't add a display: {}", sources.virtual_detail);
-                }
-                let name = format!("{}'s screen", vmon_server::host_name());
-                let spec = MonitorSpec { name: Some(name), width, height, fps, quality, source: SourceSpec::Virtual };
+                let host = vmon_server::host_name();
+                let spec = match mode {
+                    Mode::Extend => {
+                        if !sources.virtual_available {
+                            bail!("That computer can't add a display: {}", sources.virtual_detail);
+                        }
+                        let name = Some(format!("{host}'s screen"));
+                        MonitorSpec { name, width, height, fps, quality, source: SourceSpec::Virtual, placement }
+                    }
+                    Mode::Mirror => {
+                        // Its main screen is listed first.
+                        let Some(main) = sources.outputs.first() else {
+                            bail!("That computer has no screen demirror can mirror");
+                        };
+                        let (name, output) = (Some(format!("{host} (mirror)")), Some(main.name.clone()));
+                        let (width, height) = (main.width, main.height);
+                        MonitorSpec { name, width, height, fps, quality, source: SourceSpec::Screen { output }, placement }
+                    }
+                };
                 Ok((target.clone(), target.create(&spec)?))
             })();
             let _ = done.send(result);

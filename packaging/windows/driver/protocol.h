@@ -7,7 +7,7 @@
 static const GUID DEMIRROR_IDD_INTERFACE =
     {0xb3fbedff, 0x97db, 0x4045, {0x81, 0xaf, 0xe2, 0xcf, 0x87, 0x2d, 0xa1, 0xda}};
 
-#define DEMIRROR_IDD_VERSION 1
+#define DEMIRROR_IDD_VERSION 2
 
 // CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800 + n, METHOD_BUFFERED, FILE_ANY_ACCESS)
 // Out: UINT32 version.
@@ -26,7 +26,23 @@ static const GUID DEMIRROR_IDD_INTERFACE =
 #define DEMIRROR_MAX_MONITORS 8
 #define DEMIRROR_MAX_SIDE 8192
 
+// Each monitor's frames, in a shared memory section named
+// Global\demirror-idd-frame-<id>: a DEMIRROR_FRAME header, then at DEMIRROR_FRAME_PIXELS
+// the latest frame, BGRA rows of Width * 4 bytes. Sequence is odd while a frame is being
+// written: a reader copies the frame and keeps it if Sequence was even and unchanged.
+#define DEMIRROR_FRAME_NAME L"Global\\demirror-idd-frame-%u"
+#define DEMIRROR_FRAME_PIXELS 64
+
 #pragma pack(push, 4)
+struct DEMIRROR_FRAME {
+    volatile LONG64 Sequence;
+    UINT64 Frames;   // frames written so far
+    UINT32 Width;
+    UINT32 Height;
+    UINT32 Capacity; // bytes for pixels
+    UINT32 Reserved[9];
+};
+
 struct DEMIRROR_SIZE {
     UINT32 Width;
     UINT32 Height;

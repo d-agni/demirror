@@ -1,26 +1,31 @@
 //! Virtual displays on Windows, through demirror's display driver (packaging/windows/driver).
 //!
 //! The driver plugs in a monitor of the asked size, Windows extends the desktop onto it like
-//! onto any new monitor, and it's captured with GDI like any screen. The monitor lives as
+//! onto any new monitor, and the driver shares the frames Windows draws for it (a screen
+//! read with GDI can stay black for such a monitor; it's only the fallback). The monitor lives as
 //! long as this source: it's pinged every second, and the driver unplugs monitors that stop
 //! being pinged (demirror quit or crashed).
 
 use std::{
     mem, ptr,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering, fence},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
-use vmon_proto::input::InputEvent;
+use vmon_proto::{Placement, input::InputEvent};
 use windows_sys::{
     Win32::{
         Devices::{DeviceAndDriverInstallation::*, Display::*},
-        Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE},
+        Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, POINTL},
         Graphics::Gdi::*,
         Storage::FileSystem::*,
-        System::IO::DeviceIoControl,
+        System::{IO::DeviceIoControl, Memory::*},
     },
     core::GUID,
 };
@@ -125,13 +130,19 @@ pub struct VirtualSource {
     driver: Arc<Driver>,
     id: u32,
     output: String,
+    placement: Placement,
+    /// The frames the driver copies out, if it could share them.
+    frames: Option<SharedFrames>,
+    /// Whether a frame came from the driver yet; until then the screen is read with GDI.
+    from_driver: bool,
+    last: (u32, u32),
     screen: GdiSource,
     /// Dropped to stop the pings.
     _pinging: mpsc::Sender<()>,
 }
 
 impl VirtualSource {
-    pub fn open(width: u32, height: u32) -> Result<Self> {
+    pub fn open(width: u32, height: u32, placement: Placement) -> Result<Self> {
         dpi_aware();
         let driver = Arc::new(Driver::open()?);
         let names = || monitors().into_iter().map(|(name, _)| name).collect::<Vec<_>>();
@@ -161,10 +172,23 @@ impl VirtualSource {
             thread::sleep(Duration::from_millis(200));
         };
         tracing::info!("virtual display {output} plugged in");
-        // Windows picks the monitor's only mode; make sure, if it remembered another.
-        set_mode(&output, width, height);
+        arrange(&output, width, height, placement);
+        let frames = SharedFrames::open(id);
+        if frames.is_none() {
+            tracing::warn!("the display driver doesn't share {output}'s frames; reading the screen instead");
+        }
         let screen = GdiSource::open(Some(&output))?;
-        Ok(Self { driver, id, output, screen, _pinging: pinging })
+        Ok(Self {
+            driver,
+            id,
+            output,
+            placement,
+            frames,
+            from_driver: false,
+            last: (width, height),
+            screen,
+            _pinging: pinging,
+        })
     }
 }
 
@@ -182,38 +206,129 @@ fn ping(driver: Arc<Driver>, id: u32) -> mpsc::Sender<()> {
     stop
 }
 
-/// Switches `output` to `width` x `height`, if it isn't already.
-fn set_mode(output: &str, width: u32, height: u32) {
+/// Sets `output` to `width` x `height` (Windows picks the monitor's only mode, unless it
+/// remembered another) and puts it at `placement` beside the main screen.
+fn arrange(output: &str, width: u32, height: u32, placement: Placement) {
+    // The main screen is the one at the desktop's origin.
+    let main = monitors().into_iter().map(|(_, r)| r).find(|r| r.left == 0 && r.top == 0);
+    let (w, h) = (width as i32, height as i32);
+    let position = main.map(|m| match placement {
+        Placement::Right => (m.right, m.top),
+        Placement::Left => (m.left - w, m.top),
+        Placement::Above => (m.left, m.top - h),
+        Placement::Below => (m.left, m.bottom),
+    });
     let name: Vec<u16> = output.encode_utf16().chain([0]).collect();
     unsafe {
-        let mut mode: DEVMODEW = mem::zeroed();
-        mode.dmSize = mem::size_of::<DEVMODEW>() as u16;
-        if EnumDisplaySettingsW(name.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
-            && (mode.dmPelsWidth, mode.dmPelsHeight) == (width, height)
-        {
-            return;
-        }
         let mut mode: DEVMODEW = mem::zeroed();
         mode.dmSize = mem::size_of::<DEVMODEW>() as u16;
         mode.dmPelsWidth = width;
         mode.dmPelsHeight = height;
         mode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
-        let result = ChangeDisplaySettingsExW(name.as_ptr(), &mode, ptr::null_mut(), CDS_UPDATEREGISTRY, ptr::null());
+        if let Some((x, y)) = position {
+            mode.Anonymous1.Anonymous2.dmPosition = POINTL { x, y };
+            mode.dmFields |= DM_POSITION;
+        }
+        let flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+        let result = ChangeDisplaySettingsExW(name.as_ptr(), &mode, ptr::null_mut(), flags, ptr::null());
         if result != DISP_CHANGE_SUCCESSFUL {
-            tracing::warn!("{output} didn't switch to {width}x{height} ({result})");
+            tracing::warn!("{output} can't be {width}x{height} at {position:?} ({result})");
+            return;
+        }
+        // Applies what was set above.
+        ChangeDisplaySettingsExW(ptr::null(), ptr::null(), ptr::null_mut(), 0, ptr::null());
+    }
+}
+
+/// A monitor's frames, as the driver copies them out (protocol.h, DEMIRROR_FRAME).
+struct SharedFrames {
+    mapping: HANDLE,
+    view: MEMORY_MAPPED_VIEW_ADDRESS,
+}
+
+const FRAME_PIXELS: usize = 64;
+
+impl SharedFrames {
+    fn open(id: u32) -> Option<SharedFrames> {
+        let name: Vec<u16> = format!(r"Global\demirror-idd-frame-{id}").encode_utf16().chain([0]).collect();
+        unsafe {
+            let mapping = OpenFileMappingW(FILE_MAP_READ, 0, name.as_ptr());
+            if mapping.is_null() {
+                return None;
+            }
+            let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if view.Value.is_null() {
+                CloseHandle(mapping);
+                return None;
+            }
+            Some(SharedFrames { mapping, view })
+        }
+    }
+
+    /// Copies the latest frame into `out` and returns its size; `None` before the first.
+    fn read(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        let base = self.view.Value as *const u8;
+        // Odd while the driver writes a frame: copy, and keep it if nothing changed meanwhile.
+        let sequence = unsafe { &*(base as *const AtomicU64) };
+        for _ in 0..100 {
+            let before = sequence.load(Ordering::Acquire);
+            if before & 1 == 1 {
+                thread::yield_now();
+                continue;
+            }
+            let (frames, width, height, capacity) = unsafe {
+                (
+                    ptr::read_volatile(base.add(8) as *const u64),
+                    ptr::read_volatile(base.add(16) as *const u32),
+                    ptr::read_volatile(base.add(20) as *const u32),
+                    ptr::read_volatile(base.add(24) as *const u32),
+                )
+            };
+            let len = width as usize * height as usize * 4;
+            if frames == 0 || len == 0 || len > capacity as usize {
+                return None;
+            }
+            out.resize(len, 0);
+            unsafe { ptr::copy_nonoverlapping(base.add(FRAME_PIXELS), out.as_mut_ptr(), len) };
+            fence(Ordering::Acquire);
+            if sequence.load(Ordering::Acquire) == before {
+                return Some((width, height));
+            }
+        }
+        None
+    }
+}
+
+impl Drop for SharedFrames {
+    fn drop(&mut self) {
+        unsafe {
+            UnmapViewOfFile(self.view);
+            CloseHandle(self.mapping);
         }
     }
 }
 
 impl super::Source for VirtualSource {
     fn capture(&mut self, out: &mut Vec<u8>) -> Result<(u32, u32)> {
-        self.screen.capture(out)
+        match self.frames.as_ref().and_then(|f| f.read(out)) {
+            Some(size) => {
+                if !self.from_driver {
+                    tracing::info!("frames for {} come from the display driver", self.output);
+                    self.from_driver = true;
+                }
+                self.last = size;
+            }
+            // Between frames being written: the last one stays.
+            None if self.from_driver => out.resize(self.last.0 as usize * self.last.1 as usize * 4, 0),
+            None => self.last = self.screen.capture(out)?,
+        }
+        Ok(self.last)
     }
 
     /// The monitor is offered in the new size only, and switched to it.
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.driver.ioctl(IOCTL_RESIZE, &[self.id, width, height]).context("the display driver didn't resize")?;
-        set_mode(&self.output, width, height);
+        arrange(&self.output, width, height, self.placement);
         Ok(())
     }
 
