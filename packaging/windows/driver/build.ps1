@@ -80,6 +80,12 @@ $driverVer = "{0},{1}" -f (Get-Date -Format "MM/dd/yyyy"), ($parts -join ".")
 (Get-Content "$here\demirror_idd.inf" -Raw) -replace "@DRIVERVER@", $driverVer |
     Set-Content -NoNewline -Encoding ascii "$Out\demirror_idd.inf"
 
+# The INF checked as Windows checks it when installing.
+$infverif = Get-ChildItem -Recurse "$c\tools" -Filter infverif.exe | Where-Object FullName -like "*\x64\*" | Select-Object -First 1
+if (-not $infverif) { throw "infverif.exe not found in the WDK" }
+& $infverif.FullName /v "$Out\demirror_idd.inf"
+if ($LASTEXITCODE) { throw "the driver's INF has errors" }
+
 # The signing certificate.
 $store = "Cert:\CurrentUser\My"
 if ($env:DEMIRROR_SIGN_PFX) {

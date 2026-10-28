@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 - 2026-10-28
+
+### Fixed
+- Windows: installing the display driver failed with error 0xE0000219 ("no service"):
+  the driver's INF now installs the UMDF reflector service it runs behind.
+- Driver installation errors are shown with their code instead of an unreadable number.
+- The build now checks the driver's INF with InfVerif.
+
 ## 0.2.0 - 2026-10-28
 
 ### Added
