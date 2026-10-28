@@ -60,7 +60,7 @@ pub fn install_elevated() -> Result<()> {
             if GetLastError() == ERROR_CANCELLED {
                 bail!("Windows didn't get permission to install the driver");
             }
-            bail!("couldn't start the installation: {}", std::io::Error::last_os_error());
+            bail!("couldn't start the installation: {}", last_error());
         }
         let mut code = 1u32;
         if WaitForSingleObject(run.hProcess, INFINITE) == WAIT_OBJECT_0 {
@@ -115,7 +115,7 @@ fn install() -> Result<()> {
     let mut reboot = 0;
     let (id, inf) = (wide(HARDWARE_ID), wide(&inf.to_string_lossy()));
     if unsafe { UpdateDriverForPlugAndPlayDevicesW(ptr::null_mut(), id.as_ptr(), inf.as_ptr(), INSTALLFLAG_FORCE, &mut reboot) } == 0 {
-        bail!("Windows didn't install the driver: {}", std::io::Error::last_os_error());
+        bail!("Windows didn't install the driver: {}", last_error());
     }
     Ok(())
 }
@@ -143,23 +143,23 @@ fn create_device(inf: &Path) -> Result<()> {
         let mut class: GUID = mem::zeroed();
         let mut class_name = [0u16; 32];
         if SetupDiGetINFClassW(inf.as_ptr(), &mut class, class_name.as_mut_ptr(), class_name.len() as u32, ptr::null_mut()) == 0 {
-            bail!("reading the driver's INF: {}", std::io::Error::last_os_error());
+            bail!("reading the driver's INF: {}", last_error());
         }
         let set = SetupDiCreateDeviceInfoList(&class, ptr::null_mut());
-        ensure!(set != -1, "can't add a device: {}", std::io::Error::last_os_error());
+        ensure!(set != -1, "can't add a device: {}", last_error());
         let result = (|| {
             let mut device: SP_DEVINFO_DATA = mem::zeroed();
             device.cbSize = mem::size_of::<SP_DEVINFO_DATA>() as u32;
             if SetupDiCreateDeviceInfoW(set, class_name.as_ptr(), &class, ptr::null(), ptr::null_mut(), DICD_GENERATE_ID, &mut device) == 0 {
-                bail!("can't add a device: {}", std::io::Error::last_os_error());
+                bail!("can't add a device: {}", last_error());
             }
             let ids: Vec<u16> = HARDWARE_ID.encode_utf16().chain([0, 0]).collect();
             let size = (ids.len() * 2) as u32;
             if SetupDiSetDeviceRegistryPropertyW(set, &mut device, SPDRP_HARDWAREID, ids.as_ptr().cast(), size) == 0 {
-                bail!("can't name the device: {}", std::io::Error::last_os_error());
+                bail!("can't name the device: {}", last_error());
             }
             if SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, &device) == 0 {
-                bail!("can't register the device: {}", std::io::Error::last_os_error());
+                bail!("can't register the device: {}", last_error());
             }
             Ok(())
         })();
@@ -173,7 +173,7 @@ fn devices(mut found: impl FnMut(HDEVINFO, &SP_DEVINFO_DATA)) -> Result<usize> {
     let root = wide("ROOT");
     unsafe {
         let set = SetupDiGetClassDevsW(ptr::null(), root.as_ptr(), ptr::null_mut(), DIGCF_ALLCLASSES);
-        ensure!(set != -1, "can't list devices: {}", std::io::Error::last_os_error());
+        ensure!(set != -1, "can't list devices: {}", last_error());
         let mut count = 0;
         let mut device: SP_DEVINFO_DATA = mem::zeroed();
         device.cbSize = mem::size_of::<SP_DEVINFO_DATA>() as u32;
@@ -197,6 +197,17 @@ fn certutil(args: &[&str]) -> Result<()> {
     let output = Command::new("certutil").args(args).creation_flags(NO_WINDOW).output()?;
     ensure!(output.status.success(), "certutil: {}", String::from_utf8_lossy(&output.stdout).trim());
     Ok(())
+}
+
+/// The last Windows error, readable also for SetupAPI's own codes (0xE000xxxx), which
+/// Windows has no message for.
+fn last_error() -> String {
+    let code = unsafe { GetLastError() };
+    match code {
+        0xE000_0219 => format!("no service for the device: the driver's INF is incomplete (0x{code:08X})"),
+        _ if code & 0xE000_0000 == 0xE000_0000 => format!("setup error 0x{code:08X}"),
+        _ => format!("{} (0x{code:08X})", std::io::Error::from_raw_os_error(code as i32)),
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
