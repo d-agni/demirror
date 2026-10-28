@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-10-28
 
 ### Added
 - Windows display driver: on Windows 10 and 11, devices now **extend** the desktop like
