@@ -21,13 +21,18 @@
   #bar button.danger { background: rgba(255, 90, 90, .25); }
   #status { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
             padding: 24px; color: #9aa1ad; pointer-events: none; }
+  #typing { position: absolute; left: -1000px; top: 0; width: 10px; height: 10px; opacity: 0; }
+  canvas.control { cursor: none; }
 </style>
 </head>
 <body>
 <canvas id="screen"></canvas>
 <div id="status">Connecting…</div>
+<input id="typing" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-hidden="true">
 <div id="bar">
   <span id="title">demirror</span>
+  <button id="touchmode" hidden title="How touch controls the host">Touch</button>
+  <button id="keyboard" hidden>Keyboard</button>
   <button id="fullscreen">Full screen</button>
   <a id="back" href="/">Monitors</a>
   <button id="disconnect" class="danger" hidden>Disconnect</button>
@@ -46,6 +51,7 @@ const bar = document.getElementById('bar');
 document.getElementById('back').href = withToken('/');
 
 let info = null, frames = 0, fps = 0, decoding = false, pending = null, closing = false;
+let socket = null;
 
 setInterval(() => {
   fps = frames; frames = 0;
@@ -69,6 +75,18 @@ async function show(blob) {
   if (pending) { const next = pending; pending = null; show(next); }
 }
 
+const stored = (key, fallback) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
+const store = (key, value) => { try { localStorage.setItem(key, value); } catch {} };
+
+// The quality preset (chosen on the Monitors page) caps the longest side: a phone's
+// 2400-pixel screen would otherwise make a desktop too big to draw and send smoothly.
+const MAX_SIDE = { smooth: 1600, balanced: 1920, sharp: 2560, saver: 1280 };
+function displaySize(cssWidth, cssHeight) {
+  const max = MAX_SIDE[stored('demirror.preset', 'balanced')] || 1920;
+  const scale = Math.min(window.devicePixelRatio || 1, max / Math.max(cssWidth, cssHeight));
+  return { width: Math.floor(cssWidth * scale / 8) * 8, height: Math.round(cssHeight * scale / 2) * 2 };
+}
+
 // A virtual display follows this screen: rotating, resizing the window, full screen.
 let lastSize = '';
 let sizeTimer;
@@ -76,8 +94,7 @@ function followSize() {
   if (!info || info.source.kind !== 'virtual') return;
   clearTimeout(sizeTimer);
   sizeTimer = setTimeout(() => {
-    const dpr = window.devicePixelRatio || 1;
-    const width = Math.round(innerWidth * dpr), height = Math.round(innerHeight * dpr);
+    const { width, height } = displaySize(innerWidth, innerHeight);
     const key = `${width}x${height}`;
     if (key === lastSize || width < 16 || height < 16) return;
     lastSize = key;
@@ -93,11 +110,15 @@ function connect() {
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(withToken(`${scheme}://${location.host}/ws/monitors/${id}`));
   ws.binaryType = 'blob';
+  socket = ws;
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') {
       info = JSON.parse(e.data);
       document.title = info.name;
       followSize();
+      canvas.classList.toggle('control', !!info.input);
+      document.getElementById('keyboard').hidden = !info.input;
+      touchButton.hidden = !info.input || !matchMedia('(any-pointer: coarse)').matches;
       return;
     }
     status.textContent = '';
@@ -119,7 +140,7 @@ function toggleFullscreen() {
     ?.call(document.documentElement).catch(() => {});
 }
 document.getElementById('fullscreen').onclick = toggleFullscreen;
-canvas.addEventListener('dblclick', toggleFullscreen);
+canvas.addEventListener('dblclick', () => { if (!info?.input) toggleFullscreen(); });
 
 // A monitor started from this device is closed with it.
 const disconnect = document.getElementById('disconnect');
@@ -130,6 +151,210 @@ disconnect.onclick = async () => {
   await fetch(withToken(`/api/monitors/${id}`), { method: 'DELETE' }).catch(() => {});
   if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
   location.href = withToken('/');
+};
+
+// ---- Input: this device's touch, mouse and keys control the host (when it allows it) ----
+
+const send = (input) => {
+  if (info?.input && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ input }));
+};
+
+/** A point on the page as a fraction of the picture (the canvas is letterboxed). */
+function toPicture(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  const scale = Math.min(r.width / canvas.width, r.height / canvas.height);
+  const w = canvas.width * scale, h = canvas.height * scale;
+  const x = (clientX - r.left - (r.width - w) / 2) / w;
+  const y = (clientY - r.top - (r.height - h) / 2) / h;
+  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+}
+
+// Moves go out at most once a frame; a button flushes the last one first.
+let pendingMove = null;
+function moveTo(clientX, clientY) {
+  if (!pendingMove) requestAnimationFrame(flushMove);
+  pendingMove = toPicture(clientX, clientY);
+}
+function flushMove() {
+  if (pendingMove) { pointer = pendingMove; send({ t: 'move', ...pendingMove }); }
+  pendingMove = null;
+}
+function button(button, down) {
+  flushMove();
+  send({ t: 'button', button, down });
+}
+const click = (b) => { button(b, true); button(b, false); };
+const BUTTONS = ['left', 'middle', 'right'];
+
+// Mouse and pen: as they are.
+canvas.addEventListener('pointermove', (e) => { if (e.pointerType !== 'touch') moveTo(e.clientX, e.clientY); });
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch' || !BUTTONS[e.button]) return;
+  canvas.setPointerCapture(e.pointerId);
+  moveTo(e.clientX, e.clientY);
+  button(BUTTONS[e.button], true);
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (e.pointerType !== 'touch' && BUTTONS[e.button]) button(BUTTONS[e.button], false);
+});
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('wheel', (e) => {
+  if (!info?.input) return;
+  e.preventDefault();
+  // To 1/120 notch units: about 100 px or 3 lines a notch.
+  const unit = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 1200 : 1.2;
+  const dx = Math.round(e.deltaX * unit), dy = Math.round(e.deltaY * unit);
+  if (dx || dy) { flushMove(); send({ t: 'wheel', dx, dy }); }
+}, { passive: false });
+
+// Touch, two ways (the Touch button switches, remembered on this device):
+// - direct, like a touchscreen: tap = click there, drag = drag, long press = right click;
+// - trackpad, like a laptop's: a finger moves the pointer (faster the faster it moves),
+//   tap = click where the pointer is, long press then move = drag.
+// Both: two-finger tap = right click, two-finger drag = scroll.
+const touchButton = document.getElementById('touchmode');
+let trackpad = stored('demirror.touch', 'direct') === 'trackpad';
+function showTouchMode() { touchButton.textContent = trackpad ? 'Touch: trackpad' : 'Touch: direct'; }
+touchButton.onclick = () => { trackpad = !trackpad; store('demirror.touch', trackpad ? 'trackpad' : 'direct'); showTouchMode(); };
+showTouchMode();
+
+// Where the host's pointer is (fractions of the picture), for trackpad moves.
+let pointer = { x: 0.5, y: 0.5 };
+function sendPointer() { pendingMove = null; send({ t: 'move', ...pointer }); }
+function nudge(dx, dy, ms) {
+  const r = canvas.getBoundingClientRect();
+  const scale = Math.min(r.width / canvas.width, r.height / canvas.height);
+  const speed = Math.hypot(dx, dy) / Math.max(ms, 1); // CSS px per ms
+  const gain = 1 + Math.min(speed * 1.5, 3);
+  pointer = {
+    x: Math.min(1, Math.max(0, pointer.x + dx * gain / (canvas.width * scale))),
+    y: Math.min(1, Math.max(0, pointer.y + dy * gain / (canvas.height * scale))),
+  };
+  sendPointer();
+}
+
+const touches = new Map();
+let gesture = null;
+canvas.addEventListener('pointerdown', (e) => {
+  if (e.pointerType !== 'touch') return;
+  e.preventDefault();
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (touches.size === 1) {
+    gesture = { kind: 'one', x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, t: performance.now(),
+      moving: false, dragging: false, done: false };
+    gesture.timer = setTimeout(() => {
+      if (gesture?.kind !== 'one' || gesture.moving) return;
+      if (trackpad) { gesture.dragging = true; button('left', true); }
+      else { moveTo(gesture.x0, gesture.y0); click('right'); gesture.done = true; }
+      navigator.vibrate?.(15);
+    }, 500);
+  } else if (touches.size === 2) {
+    if (gesture?.kind === 'one') {
+      clearTimeout(gesture.timer);
+      if (gesture.dragging) button('left', false);
+    }
+    const [a, b] = [...touches.values()];
+    gesture = { kind: 'two', mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, moved: 0, t0: performance.now() };
+  }
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (gesture?.kind === 'one' && !gesture.done) {
+    if (!gesture.moving && Math.hypot(e.clientX - gesture.x0, e.clientY - gesture.y0) > 10) {
+      gesture.moving = true;
+      if (!gesture.dragging) clearTimeout(gesture.timer);
+      if (!trackpad) { gesture.dragging = true; moveTo(gesture.x0, gesture.y0); button('left', true); }
+    }
+    if (!gesture.moving) return;
+    const now = performance.now();
+    if (trackpad) nudge(e.clientX - gesture.x, e.clientY - gesture.y, now - gesture.t);
+    else moveTo(e.clientX, e.clientY);
+    gesture.x = e.clientX; gesture.y = e.clientY; gesture.t = now;
+  } else if (gesture?.kind === 'two' && touches.size === 2) {
+    const [a, b] = [...touches.values()];
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    // Fingers up scroll down, as on a phone; about 50 px of finger a notch.
+    const dx = Math.round((gesture.mx - mx) * 2.4), dy = Math.round((gesture.my - my) * 2.4);
+    gesture.moved += Math.abs(mx - gesture.mx) + Math.abs(my - gesture.my);
+    gesture.mx = mx; gesture.my = my;
+    if (dx || dy) send({ t: 'wheel', dx, dy });
+  }
+});
+function touchEnd(e) {
+  if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
+  touches.delete(e.pointerId);
+  if (gesture?.kind === 'one') {
+    clearTimeout(gesture.timer);
+    if (gesture.dragging) button('left', false);
+    else if (!gesture.done && !gesture.moving && e.type === 'pointerup') {
+      if (trackpad) sendPointer(); else moveTo(gesture.x0, gesture.y0);
+      click('left');
+    }
+    gesture = null;
+  } else if (gesture?.kind === 'two' && touches.size === 0) {
+    if (gesture.moved < 12 && performance.now() - gesture.t0 < 400) click('right');
+    gesture = null;
+  }
+}
+canvas.addEventListener('pointerup', touchEnd);
+canvas.addEventListener('pointercancel', touchEnd);
+
+// Keys: physical keys as they are (KeyboardEvent.code); none left held when focus goes.
+const held = new Set();
+addEventListener('keydown', (e) => {
+  if (!info?.input || e.target === typing) return;
+  e.preventDefault();
+  held.add(e.code);
+  send({ t: 'key', code: e.code, down: true });
+});
+addEventListener('keyup', (e) => {
+  if (!info?.input || e.target === typing) return;
+  e.preventDefault();
+  held.delete(e.code);
+  send({ t: 'key', code: e.code, down: false });
+});
+function releaseAll() {
+  for (const code of held) send({ t: 'key', code, down: false });
+  held.clear();
+}
+addEventListener('blur', releaseAll);
+
+// A phone's on-screen keyboard: its characters typed as US-layout key presses.
+const typing = document.getElementById('typing');
+const SHIFTED = { '!': 'Digit1', '@': 'Digit2', '#': 'Digit3', '$': 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7',
+  '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', '_': 'Minus', '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight',
+  '|': 'Backslash', ':': 'Semicolon', '"': 'Quote', '~': 'Backquote', '<': 'Comma', '>': 'Period', '?': 'Slash' };
+const PLAIN = { ' ': 'Space', '-': 'Minus', '=': 'Equal', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash',
+  ';': 'Semicolon', "'": 'Quote', '`': 'Backquote', ',': 'Comma', '.': 'Period', '/': 'Slash', '\n': 'Enter' };
+function press(code, shift = false) {
+  if (shift) send({ t: 'key', code: 'ShiftLeft', down: true });
+  send({ t: 'key', code, down: true });
+  send({ t: 'key', code, down: false });
+  if (shift) send({ t: 'key', code: 'ShiftLeft', down: false });
+}
+function typeChar(c) {
+  if (/^[a-z]$/.test(c)) press('Key' + c.toUpperCase());
+  else if (/^[A-Z]$/.test(c)) press('Key' + c, true);
+  else if (/^[0-9]$/.test(c)) press('Digit' + c);
+  else if (PLAIN[c]) press(PLAIN[c]);
+  else if (SHIFTED[c]) press(SHIFTED[c], true);
+}
+typing.addEventListener('beforeinput', (e) => {
+  e.preventDefault();
+  if (e.inputType === 'deleteContentBackward') press('Backspace');
+  else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') press('Enter');
+  else if (e.data) for (const c of e.data) typeChar(c);
+});
+typing.addEventListener('keydown', (e) => {
+  // Keys the on-screen keyboard doesn't turn into text.
+  const keys = { Enter: 'Enter', Backspace: 'Backspace', Tab: 'Tab', Escape: 'Escape',
+    ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight', ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown' };
+  if (keys[e.key] && e.key !== 'Backspace' && e.key !== 'Enter') { e.preventDefault(); press(keys[e.key]); }
+});
+document.getElementById('keyboard').onclick = () => {
+  if (document.activeElement === typing) typing.blur();
+  else typing.focus();
 };
 
 // Keep the screen on while it's a monitor.

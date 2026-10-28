@@ -1,4 +1,4 @@
-//! The Host page: run demirror's server on this computer, show how to reach it, manage its
+//! The Share page: run demirror's server on this computer, show how to reach it, manage its
 //! monitors.
 
 use std::{
@@ -14,36 +14,34 @@ use vmon_server::{Config, OutputCommands, Server};
 
 use crate::{
     net::{self, Target},
+    settings::Settings,
     widgets,
 };
 
+/// A monitor to show in the app: where, which, and whether it was started from here.
+pub type ViewRequest = (Target, u32, bool);
+
 pub struct Host {
     server: Option<Server>,
-    port: u16,
-    require_token: bool,
-    token: String,
-    announce: bool,
     error: Option<String>,
     /// Whether this computer can add virtual displays, and the driver or why not.
     support: Arc<Mutex<Option<(bool, String)>>>,
     support_checked: Option<Instant>,
     thumbs: HashMap<u32, TextureHandle>,
     thumbs_at: Option<Instant>,
+    copied_at: Option<Instant>,
 }
 
 impl Host {
     pub fn new() -> Host {
         Host {
             server: None,
-            port: vmon_proto::DEFAULT_PORT,
-            require_token: false,
-            token: net::new_token(),
-            announce: true,
             error: None,
             support: Arc::default(),
             support_checked: None,
             thumbs: HashMap::new(),
             thumbs_at: None,
+            copied_at: None,
         }
     }
 
@@ -51,20 +49,21 @@ impl Host {
         self.server.is_some()
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self, settings: &Settings) {
         let config = Config {
             bind: [0, 0, 0, 0].into(),
-            port: self.port,
-            token: self.require_token.then(|| self.token.trim().to_string()).filter(|t| !t.is_empty()),
+            port: settings.port,
+            token: settings.require_token.then(|| settings.token.trim().to_string()).filter(|t| !t.is_empty()),
             commands: OutputCommands::default(),
-            advertise: self.announce,
+            advertise: settings.announce,
+            allow_input: settings.allow_input,
         };
         match Server::start(config) {
             Ok(server) => {
                 self.server = Some(server);
                 self.error = None;
             }
-            Err(e) => self.error = Some(format!("{e:#}")),
+            Err(e) => self.error = Some(format!("Couldn't start sharing: {e:#}")),
         }
     }
 
@@ -75,93 +74,157 @@ impl Host {
         self.thumbs.clear();
     }
 
-    /// `view`: set to a monitor of this host to show in the app.
-    pub fn ui(&mut self, ui: &mut egui::Ui, view: &mut Option<(Target, u32, bool)>) {
-        self.check_support(ui.ctx());
-        ui.heading("Share this computer's desktop");
-        ui.label("Other devices on your network become extra monitors for this computer.");
-        ui.add_space(12.0);
-
-        widgets::card(ui, |ui| self.server_ui(ui));
-        ui.add_space(12.0);
-        widgets::card(ui, |ui| self.support_ui(ui));
+    /// Devices may (or may not) control this computer from now on.
+    pub fn set_allow_input(&self, allow: bool) {
         if let Some(server) = &self.server {
-            // Monitors come and go from other devices: look again every second.
-            ui.ctx().request_repaint_after(Duration::from_secs(1));
-            ui.add_space(12.0);
-            let manager = server.manager.clone();
-            let local = Target { base: format!("http://127.0.0.1:{}", server.port), token: server.token.clone() };
-            widgets::card(ui, |ui| self.monitors_ui(ui, &manager, &local, view));
+            server.manager.set_allow_input(allow);
         }
     }
 
-    fn server_ui(&mut self, ui: &mut egui::Ui) {
-        match &self.server {
-            None => {
-                ui.horizontal(|ui| {
-                    widgets::status_dot(ui, Color32::GRAY);
-                    ui.label(RichText::new("Not sharing").strong());
+    pub fn monitor_count(&self) -> usize {
+        self.server.as_ref().map_or(0, |s| s.manager.list().len())
+    }
+
+    /// `view`: set to a monitor of this host to show in the app.
+    pub fn ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings, view: &mut Option<ViewRequest>) {
+        self.check_support(ui.ctx());
+        widgets::page_title(ui, "Share this computer", "Phones, tablets and other computers become extra monitors for this desktop.");
+        if let Some(e) = &self.error
+            && widgets::banner(ui, e, ui.visuals().error_fg_color)
+        {
+            self.error = None;
+        }
+
+        widgets::card(ui, |ui| self.sharing_ui(ui, settings));
+        ui.add_space(12.0);
+        self.status_row(ui, settings);
+
+        if let Some(server) = &self.server {
+            // Monitors come and go from other devices: look again every second.
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            ui.add_space(18.0);
+            let manager = server.manager.clone();
+            let local = Target { base: format!("http://127.0.0.1:{}", server.port), token: server.token.clone() };
+            self.monitors_ui(ui, &manager, &local, view);
+        }
+    }
+
+    fn sharing_ui(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        let Some(server) = &self.server else {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("🖥").size(40.0));
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    widgets::section(ui, "Not sharing");
+                    ui.label(RichText::new("Start sharing, then open the address it shows on the other device. No app is needed there; a browser will do.").weak());
                 });
-                ui.add_space(8.0);
-                egui::Grid::new("host-settings").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-                    ui.label("Port");
-                    ui.add(egui::DragValue::new(&mut self.port).range(1024..=65535));
-                    ui.end_row();
-                    ui.label("Token");
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.require_token, "Ask devices for a token");
-                        ui.add_enabled(self.require_token, egui::TextEdit::singleline(&mut self.token).desired_width(150.0));
-                        if ui.add_enabled(self.require_token, egui::Button::new("New")).clicked() {
-                            self.token = net::new_token();
-                        }
-                    });
-                    ui.end_row();
-                    ui.label("Network");
-                    ui.checkbox(&mut self.announce, "Let devices find this computer");
-                    ui.end_row();
-                });
-                ui.add_space(8.0);
-                if ui.add(egui::Button::new(RichText::new("Start sharing").strong()).min_size(vec2(160.0, 34.0))).clicked() {
-                    self.start();
+            });
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let ready = !matches!(&*self.support.lock().unwrap(), Some((false, _)));
+                if widgets::primary_button(ui, "Start sharing", true).clicked() {
+                    self.start(settings);
                 }
-                if let Some(e) = &self.error {
-                    ui.colored_label(ui.visuals().error_fg_color, e);
+                if !ready {
+                    ui.label(RichText::new("Monitors would only mirror: virtual displays aren't set up (see below).").small().weak());
                 }
-            }
-            Some(server) => {
-                let url = server.share_url();
-                let mut stop = false;
+            });
+            return;
+        };
+
+        let url = server.share_url();
+        let mut stop = false;
+        ui.horizontal_top(|ui| {
+            widgets::qr_code(ui, &url, 176.0);
+            ui.add_space(18.0);
+            ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     widgets::status_dot(ui, widgets::OK);
-                    ui.label(RichText::new(format!("Sharing on port {}", server.port)).strong());
+                    widgets::section(ui, "Sharing");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        stop = ui.button("Stop sharing").clicked();
+                        stop = widgets::quiet_button(ui, "Stop sharing").clicked();
                     });
                 });
-                ui.add_space(8.0);
-                ui.horizontal_top(|ui| {
-                    widgets::qr_code(ui, &url, 150.0);
-                    ui.add_space(12.0);
-                    ui.vertical(|ui| {
-                        ui.label("On a phone or tablet, scan the code or open:");
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&url).monospace().size(15.0));
-                            if ui.small_button("Copy").clicked() {
-                                ui.ctx().copy_text(url.clone());
-                            }
-                        });
-                        ui.add_space(4.0);
-                        ui.label("Then tap Start monitor. Its resolution is detected from that screen.");
-                        ui.label("Another computer with demirror finds this one under Connect.");
-                        ui.add_space(4.0);
-                        ui.hyperlink_to("Open the dashboard in a browser", &url);
-                    });
+                ui.add_space(6.0);
+                widgets::step(ui, 1, "Put the other device on the same Wi-Fi or network.");
+                widgets::step(ui, 2, "Scan the code with its camera, or open this address:");
+                ui.horizontal(|ui| {
+                    ui.add_space(32.0);
+                    egui::Frame::new()
+                        .fill(ui.visuals().extreme_bg_color)
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::symmetric(10, 6))
+                        .show(ui, |ui| ui.label(RichText::new(&url).monospace().size(15.0).strong()));
+                    let copied = self.copied_at.is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+                    if ui.button(if copied { "Copied ✔" } else { "Copy" }).clicked() {
+                        ui.ctx().copy_text(url.clone());
+                        self.copied_at = Some(Instant::now());
+                        ui.ctx().request_repaint_after(Duration::from_secs(2));
+                    }
                 });
-                if stop {
-                    self.stop();
+                widgets::step(ui, 3, "Tap Start monitor. It's sized to fit that screen.");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(32.0);
+                    ui.label(RichText::new("Another computer with demirror finds this one on its Use as monitor page.").small().weak());
+                });
+                if let Some(token) = &server.token {
+                    ui.horizontal(|ui| {
+                        ui.add_space(32.0);
+                        ui.label(RichText::new(format!("Devices need the token {token} (it's in the code and the address).")).small().weak());
+                    });
+                }
+            });
+        });
+        if stop {
+            self.stop();
+        }
+    }
+
+    /// Chips under the sharing card: virtual displays, control, discovery.
+    fn status_row(&mut self, ui: &mut egui::Ui, settings: &mut Settings) {
+        let support = self.support.lock().unwrap().clone();
+        widgets::card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                match &support {
+                    None => {
+                        ui.spinner();
+                        ui.label("Checking virtual displays…");
+                    }
+                    Some((true, detail)) => {
+                        widgets::pill(ui, "✔ Virtual displays ready", widgets::OK).on_hover_text(detail);
+                    }
+                    Some((false, detail)) => {
+                        widgets::pill(ui, "⚠ Virtual displays unavailable", widgets::WARN).on_hover_text(detail);
+                    }
+                }
+                let (text, color) = if settings.announce { ("Found on the network", widgets::ACCENT) } else { ("Hidden from the network", widgets::IDLE) };
+                widgets::pill(ui, text, color).on_hover_text("Change in Settings");
+                if settings.require_token {
+                    widgets::pill(ui, "🔒 Token needed", widgets::ACCENT);
+                }
+            });
+            if let Some((false, detail)) = &support {
+                ui.add_space(6.0);
+                ui.label(RichText::new(detail).small().weak());
+                if cfg!(target_os = "linux") {
+                    ui.label("Install the display service once (it plugs monitors into the kernel):");
+                    ui.label(RichText::new("sudo packaging/linux/install-linux.sh").monospace());
+                } else {
+                    ui.label("On this system demirror can mirror screens; extending the desktop needs a virtual display driver.");
                 }
             }
-        }
+            ui.add_space(8.0);
+            let control = widgets::switch(
+                ui,
+                &mut settings.allow_input,
+                "Let devices control this computer",
+                "Touch, mouse and keyboard on a monitor work on this desktop.",
+            );
+            if control.changed() {
+                self.set_allow_input(settings.allow_input);
+            }
+        });
     }
 
     fn check_support(&mut self, ctx: &egui::Context) {
@@ -176,48 +239,21 @@ impl Host {
         });
     }
 
-    fn support_ui(&mut self, ui: &mut egui::Ui) {
-        let support = self.support.lock().unwrap().clone();
-        ui.horizontal(|ui| match &support {
-            None => {
-                ui.spinner();
-                ui.label("Checking virtual displays…");
-            }
-            Some((true, detail)) => {
-                widgets::status_dot(ui, widgets::OK);
-                ui.label(RichText::new("Virtual displays ready").strong());
-                ui.label(RichText::new(detail).weak());
-            }
-            Some((false, detail)) => {
-                widgets::status_dot(ui, widgets::WARN);
-                ui.label(RichText::new("Virtual displays unavailable").strong());
-                ui.label(RichText::new(detail).weak());
-            }
-        });
-        if let Some((false, _)) = &support {
-            ui.add_space(4.0);
-            if cfg!(target_os = "linux") {
-                ui.label("Install the display service once (it plugs monitors into the kernel):");
-                ui.label(RichText::new("sudo packaging/linux/install-linux.sh").monospace());
-            } else {
-                ui.label("On this system demirror can mirror screens; extending the desktop needs a virtual display driver.");
-            }
-        }
-    }
-
     fn monitors_ui(
         &mut self,
         ui: &mut egui::Ui,
         manager: &vmon_server::MonitorManager,
         local: &Target,
-        view: &mut Option<(Target, u32, bool)>,
+        view: &mut Option<ViewRequest>,
     ) {
         let monitors = manager.list();
         self.refresh_thumbs(ui.ctx(), manager, &monitors);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Monitors").strong());
+            widgets::section(ui, "Monitors");
+            widgets::pill(ui, monitors.len().to_string(), widgets::ACCENT);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Add test monitor").on_hover_text("An animated pattern, to try a device").clicked() {
+                let test = widgets::quiet_button(ui, "＋ Test monitor").on_hover_text("An animated pattern, to try a device");
+                if test.clicked() {
                     let spec = MonitorSpec { name: Some("Test pattern".into()), ..Default::default() };
                     if let Err(e) = manager.create(spec) {
                         self.error = Some(format!("{e:#}"));
@@ -225,35 +261,71 @@ impl Host {
                 }
             });
         });
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         if monitors.is_empty() {
-            ui.label(RichText::new("None yet. Start one from a phone, tablet or another computer.").weak());
+            widgets::card(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("📱  💻").size(30.0));
+                    ui.label(RichText::new("No monitors yet").strong());
+                    ui.label(RichText::new("They appear here when a device starts one, and go when it disconnects.").weak());
+                    ui.add_space(10.0);
+                });
+            });
             return;
         }
         let mut close = None;
+        let width = 240.0;
         ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(12.0, 12.0);
             for m in &monitors {
-                widgets::card(ui, |ui| {
-                    ui.set_width(220.0);
-                    let (rect, _) = ui.allocate_exact_size(vec2(220.0, 138.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 6.0, Color32::BLACK);
-                    if let Some(texture) = self.thumbs.get(&m.id) {
-                        let size = texture.size_vec2();
-                        let scale = (rect.width() / size.x).min(rect.height() / size.y);
-                        let shown = egui::Rect::from_center_size(rect.center(), size * scale);
-                        ui.painter().image(texture.id(), shown, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
-                    }
-                    ui.label(RichText::new(&m.name).strong());
-                    ui.label(RichText::new(describe(m)).weak().small());
-                    ui.horizontal(|ui| {
-                        if ui.button("View here").clicked() {
-                            *view = Some((local.clone(), m.id, false));
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                    .corner_radius(12)
+                    .inner_margin(10)
+                    .show(ui, |ui| ui.vertical(|ui| {
+                        ui.set_width(width);
+                        let height = width * 9.0 / 16.0;
+                        let (rect, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 8.0, Color32::from_gray(12));
+                        match self.thumbs.get(&m.id) {
+                            Some(texture) => {
+                                let size = texture.size_vec2();
+                                let scale = (rect.width() / size.x).min(rect.height() / size.y);
+                                let shown = egui::Rect::from_center_size(rect.center(), size * scale);
+                                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                                ui.painter().image(texture.id(), shown, uv, Color32::WHITE);
+                            }
+                            None => {
+                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "No picture yet", egui::FontId::proportional(13.0), Color32::GRAY);
+                            }
                         }
-                        if ui.button("Close").clicked() {
-                            close = Some(m.id);
-                        }
-                    });
-                });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            widgets::status_dot(ui, if m.viewers > 0 { widgets::OK } else { widgets::IDLE });
+                            ui.add(egui::Label::new(RichText::new(&m.name).strong()).truncate());
+                        });
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            widgets::pill(ui, format!("{} × {}", m.width, m.height), widgets::IDLE);
+                            widgets::pill(ui, kind(m), widgets::IDLE);
+                            let viewers = match m.viewers {
+                                0 => "not viewed".to_string(),
+                                1 => "1 viewer".to_string(),
+                                n => format!("{n} viewers"),
+                            };
+                            widgets::pill(ui, viewers, if m.viewers > 0 { widgets::OK } else { widgets::IDLE });
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("View here").on_hover_text("Show it in this window").clicked() {
+                                *view = Some((local.clone(), m.id, false));
+                            }
+                            if widgets::quiet_button(ui, "Close").on_hover_text("Unplug it; its windows move back").clicked() {
+                                close = Some(m.id);
+                            }
+                        });
+                    }));
             }
         });
         if let Some(id) = close {
@@ -284,12 +356,10 @@ impl Host {
     }
 }
 
-fn describe(m: &MonitorInfo) -> String {
-    let kind = match &m.source {
-        SourceSpec::Virtual => "virtual display".to_string(),
+fn kind(m: &MonitorInfo) -> String {
+    match &m.source {
+        SourceSpec::Virtual => "extends the desktop".to_string(),
         SourceSpec::Synthetic => "test pattern".to_string(),
-        SourceSpec::Screen { output } => format!("mirror {}", output.as_deref().unwrap_or("")),
-    };
-    let viewers = if m.viewers == 1 { "1 viewer".to_string() } else { format!("{} viewers", m.viewers) };
-    format!("{} × {} · {kind} · {viewers}", m.width, m.height)
+        SourceSpec::Screen { output } => format!("mirrors {}", output.as_deref().unwrap_or("a screen")),
+    }
 }

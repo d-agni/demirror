@@ -8,8 +8,10 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod wlr;
 
+use std::sync::mpsc;
+
 use anyhow::Result;
-use vmon_proto::OutputInfo;
+use vmon_proto::{OutputInfo, input::InputEvent};
 
 pub use synthetic::Synthetic;
 
@@ -24,6 +26,12 @@ pub trait Source {
     /// the rest keep their size and the viewer scales.
     fn resize(&mut self, _width: u32, _height: u32) -> Result<()> {
         Ok(())
+    }
+
+    /// Where viewers' input for this source goes, if it takes input. Called once, when the
+    /// source is open; the events are delivered without waiting for captures.
+    fn input(&mut self) -> Option<mpsc::Sender<InputEvent>> {
+        None
     }
 }
 

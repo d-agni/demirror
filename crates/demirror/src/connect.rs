@@ -1,4 +1,4 @@
-//! The Connect page: use this computer's screen as a monitor of another one.
+//! The Use as monitor page: this computer's screen becomes a monitor of another one.
 
 use std::{
     sync::{Arc, Mutex, mpsc},
@@ -6,155 +6,188 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use eframe::egui::{self, RichText, vec2};
+use eframe::egui::{self, RichText};
 use vmon_proto::{MonitorInfo, MonitorSpec, SourceSpec};
 
 use crate::{
+    host::ViewRequest,
     net::{self, FoundHost, Target},
+    settings::{self, Preset, Settings},
     widgets,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Preset {
-    Smooth,
-    Balanced,
-    Sharp,
-    Saver,
-}
-
-impl Preset {
-    const ALL: [Preset; 4] = [Preset::Smooth, Preset::Balanced, Preset::Sharp, Preset::Saver];
-
-    fn label(self) -> &'static str {
-        match self {
-            Preset::Smooth => "Smooth (60 fps)",
-            Preset::Balanced => "Balanced (30 fps)",
-            Preset::Sharp => "Sharp (best quality)",
-            Preset::Saver => "Data saver (15 fps)",
-        }
-    }
-
-    fn fps_quality(self) -> (u32, u8) {
-        match self {
-            Preset::Smooth => (60, 70),
-            Preset::Balanced => (30, 75),
-            Preset::Sharp => (30, 90),
-            Preset::Saver => (15, 55),
-        }
-    }
-}
+type Starting = mpsc::Receiver<Result<(Target, MonitorInfo)>>;
 
 pub struct Connect {
     hosts: Arc<Mutex<Vec<FoundHost>>>,
-    address: String,
-    token: String,
-    preset: Preset,
     error: Option<String>,
-    starting: Option<mpsc::Receiver<Result<(Target, MonitorInfo)>>>,
+    /// The address a monitor is being started on, and the answer to come.
+    starting: Option<(String, Starting)>,
+    /// A found host that wants a token: its address, while the token is typed.
+    token_for: Option<String>,
 }
 
 impl Connect {
     pub fn new(ctx: &egui::Context) -> Connect {
         let ctx = ctx.clone();
-        Connect {
-            hosts: net::discover(move || ctx.request_repaint()),
-            address: String::new(),
-            token: String::new(),
-            preset: Preset::Balanced,
-            error: None,
-            starting: None,
-        }
+        Connect { hosts: net::discover(move || ctx.request_repaint()), error: None, starting: None, token_for: None }
     }
 
     /// `screen`: this screen's size in pixels. `view`: set to the monitor to show once started.
-    pub fn ui(&mut self, ui: &mut egui::Ui, screen: Option<[u32; 2]>, view: &mut Option<(Target, u32, bool)>) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, screen: Option<[u32; 2]>, settings: &mut Settings, view: &mut Option<ViewRequest>) {
         self.poll(view);
-        ui.heading("Use this computer as a monitor");
-        ui.label("Extend another computer's desktop onto this screen.");
-        ui.add_space(12.0);
+        widgets::page_title(ui, "Use as a monitor", "This screen becomes an extra monitor for another computer that's sharing.");
+        if let Some(e) = &self.error
+            && widgets::banner(ui, e, ui.visuals().error_fg_color)
+        {
+            self.error = None;
+        }
 
         widgets::card(ui, |ui| {
-            ui.label(RichText::new("This screen").weak());
-            match screen {
-                Some([w, h]) => {
-                    ui.label(RichText::new(format!("{w} × {h}")).size(26.0).strong());
-                    ui.label(RichText::new("Detected. The monitor follows if you resize the window or change the screen.").weak());
+            ui.horizontal(|ui| {
+                widgets::section(ui, "Computers sharing nearby");
+                if self.starting.is_none() {
+                    ui.spinner().on_hover_text("Still looking");
                 }
-                None => {
-                    ui.label(RichText::new("Detecting…").size(26.0));
-                }
+            });
+            ui.add_space(6.0);
+            let hosts = self.hosts.lock().unwrap().clone();
+            if hosts.is_empty() {
+                ui.label(RichText::new("None found yet. On the other computer, open demirror and press Start sharing, or enter its address below.").weak());
+            }
+            for host in hosts {
+                self.host_row(ui, &host, screen, settings);
+                ui.add_space(6.0);
             }
         });
         ui.add_space(12.0);
 
         widgets::card(ui, |ui| {
-            ui.label(RichText::new("Computers sharing on this network").strong());
+            widgets::section(ui, "Picture");
             ui.add_space(4.0);
-            let hosts = self.hosts.lock().unwrap().clone();
-            if hosts.is_empty() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(RichText::new("Looking… (or type the address below)").weak());
-                });
-            }
-            for host in hosts {
-                ui.horizontal(|ui| {
-                    let selected = Target::parse(&self.address, "").is_ok_and(|t| t.base.ends_with(&host.address));
-                    if ui.selectable_label(selected, RichText::new(&host.name).strong()).clicked() {
-                        self.address = host.address.clone();
-                    }
-                    ui.label(RichText::new(&host.address).weak());
-                    if host.token_required {
-                        ui.label(RichText::new("token needed").weak().small());
-                    }
-                });
-            }
-            ui.add_space(8.0);
-            egui::Grid::new("connect-to").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-                ui.label("Address");
-                ui.add(egui::TextEdit::singleline(&mut self.address).hint_text("192.168.1.5 or host:7878").desired_width(260.0));
-                ui.end_row();
-                ui.label("Token");
-                ui.add(egui::TextEdit::singleline(&mut self.token).hint_text("only if the host asks").password(true).desired_width(260.0));
-                ui.end_row();
-                ui.label("Quality");
-                ui.horizontal_wrapped(|ui| {
-                    for preset in Preset::ALL {
-                        ui.selectable_value(&mut self.preset, preset, preset.label());
-                    }
-                });
-                ui.end_row();
-            });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let busy = self.starting.is_some();
-                let button = egui::Button::new(RichText::new("Start monitor").strong()).min_size(vec2(160.0, 34.0));
-                if ui.add_enabled(!busy && screen.is_some(), button).clicked() {
-                    self.start(screen.unwrap_or([1920, 1080]), ui.ctx());
+            widgets::segmented(ui, &mut settings.preset, &Preset::ALL.map(|p| (p, p.label())));
+            ui.label(RichText::new(settings.preset.detail()).small().weak());
+            ui.add_space(6.0);
+            match screen {
+                Some(size) => {
+                    let [w, h] = settings::fit(size, settings.preset.max_side());
+                    ui.label(format!("This screen is {} × {}: the monitor will be {w} × {h}, and follows the window's size.", size[0], size[1]));
                 }
-                if busy {
-                    ui.spinner();
-                    ui.label("Asking the host for a monitor…");
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Measuring this screen…");
+                    });
                 }
-            });
-            if let Some(e) = &self.error {
-                ui.colored_label(ui.visuals().error_fg_color, e);
             }
+        });
+        ui.add_space(12.0);
+
+        let none_found = self.hosts.lock().unwrap().is_empty();
+        widgets::card(ui, |ui| {
+            egui::CollapsingHeader::new(RichText::new("Connect by address").strong())
+                .default_open(none_found)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("The address the other computer shows, like 192.168.1.5:7878.").small().weak());
+                    ui.add_space(4.0);
+                    egui::Grid::new("connect-to").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                        ui.label("Address");
+                        ui.add(egui::TextEdit::singleline(&mut settings.address).hint_text("192.168.1.5:7878").desired_width(280.0));
+                        ui.end_row();
+                        ui.label("Token");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut settings.host_token)
+                                .hint_text("only if it asks for one")
+                                .password(true)
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                    });
+                    ui.add_space(8.0);
+                    let address = settings.address.clone();
+                    self.start_button(ui, &address, screen, settings);
+                });
         });
     }
 
-    pub fn start(&mut self, [width, height]: [u32; 2], ctx: &egui::Context) {
+    fn host_row(&mut self, ui: &mut egui::Ui, host: &FoundHost, screen: Option<[u32; 2]>, settings: &mut Settings) {
+        egui::Frame::new()
+            .fill(ui.visuals().extreme_bg_color)
+            .corner_radius(10)
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("🖥").size(26.0));
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new(&host.name).strong().size(15.5));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&host.address).small().weak());
+                            if host.token_required {
+                                widgets::pill(ui, "🔒 token", widgets::ACCENT);
+                            }
+                        });
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if host.token_required && self.token_for.as_deref() != Some(&host.address) {
+                            if ui.button("Start monitor…").clicked() {
+                                self.token_for = Some(host.address.clone());
+                            }
+                        } else if !host.token_required {
+                            self.start_button_for(ui, &host.address, "", screen, settings);
+                        }
+                    });
+                });
+                if host.token_required && self.token_for.as_deref() == Some(&host.address) {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Token");
+                        ui.add(egui::TextEdit::singleline(&mut settings.host_token).password(true).desired_width(180.0));
+                        let token = settings.host_token.clone();
+                        self.start_button_for(ui, &host.address, &token, screen, settings);
+                    });
+                }
+            });
+    }
+
+    fn start_button(&mut self, ui: &mut egui::Ui, address: &str, screen: Option<[u32; 2]>, settings: &Settings) {
+        let token = settings.host_token.clone();
+        ui.horizontal(|ui| self.start_button_for(ui, address, &token, screen, settings));
+    }
+
+    fn start_button_for(&mut self, ui: &mut egui::Ui, address: &str, token: &str, screen: Option<[u32; 2]>, settings: &Settings) {
+        let this_one = self.starting.as_ref().is_some_and(|(a, _)| a == address);
+        if this_one {
+            ui.spinner();
+            ui.label("Starting…");
+            return;
+        }
+        let enabled = self.starting.is_none() && screen.is_some() && !address.trim().is_empty();
+        if widgets::primary_button(ui, "Start monitor", enabled).clicked() {
+            let size = settings::fit(screen.unwrap_or([1920, 1080]), settings.preset.max_side());
+            self.start_at(address, token, size, settings.preset, ui.ctx());
+        }
+    }
+
+    /// Starts a monitor on the address and token in `settings` (`--connect … --start`).
+    pub fn start(&mut self, screen: [u32; 2], settings: &Settings, ctx: &egui::Context) {
+        let size = settings::fit(screen, settings.preset.max_side());
+        self.start_at(&settings.address, &settings.host_token, size, settings.preset, ctx);
+    }
+
+    fn start_at(&mut self, address: &str, token: &str, [width, height]: [u32; 2], preset: Preset, ctx: &egui::Context) {
         self.error = None;
-        let (address, token, (fps, quality)) = (self.address.clone(), self.token.clone(), self.preset.fps_quality());
+        let (address, token, (fps, quality)) = (address.to_string(), token.to_string(), preset.fps_quality());
         let (done, starting) = mpsc::channel();
-        self.starting = Some(starting);
+        self.starting = Some((address.clone(), starting));
         let ctx = ctx.clone();
         thread::spawn(move || {
             let result = (|| {
                 let target = Target::parse(&address, &token)?;
                 let sources = target.sources()?;
                 if !sources.virtual_available {
-                    bail!("that computer can't add a display: {}", sources.virtual_detail);
+                    bail!("That computer can't add a display: {}", sources.virtual_detail);
                 }
                 let name = format!("{}'s screen", vmon_server::host_name());
                 let spec = MonitorSpec { name: Some(name), width, height, fps, quality, source: SourceSpec::Virtual };
@@ -165,11 +198,12 @@ impl Connect {
         });
     }
 
-    fn poll(&mut self, view: &mut Option<(Target, u32, bool)>) {
-        let Some(starting) = &self.starting else { return };
+    fn poll(&mut self, view: &mut Option<ViewRequest>) {
+        let Some((_, starting)) = &self.starting else { return };
         match starting.try_recv() {
             Ok(Ok((target, info))) => {
                 self.starting = None;
+                self.token_for = None;
                 *view = Some((target, info.id, true));
             }
             Ok(Err(e)) => {
@@ -179,10 +213,6 @@ impl Connect {
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => self.starting = None,
         }
-    }
-
-    pub fn set_address(&mut self, address: String) {
-        self.address = address;
     }
 
     pub fn show_error(&mut self, error: String) {

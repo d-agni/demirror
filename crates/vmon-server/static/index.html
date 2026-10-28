@@ -142,20 +142,23 @@ async function api(method, path, body) {
   return res.status === 204 ? null : res.json();
 }
 
-/** This screen in device pixels, in its current orientation. */
+/** The display for this screen, in its current orientation: its pixels, though the
+ * preset caps the longest side (a phone's 2400 pixels would be too much to draw and send). */
+const MAX_SIDE = { smooth: 1600, balanced: 1920, sharp: 2560, saver: 1280 };
 function deviceSize() {
   const dpr = window.devicePixelRatio || 1;
-  let w = Math.round(screen.width * dpr), h = Math.round(screen.height * dpr);
+  let w = screen.width, h = screen.height;
   // Some browsers report the portrait size whatever the orientation.
   const landscape = matchMedia('(orientation: landscape)').matches;
   if (landscape !== (w >= h)) [w, h] = [h, w];
-  return { width: w, height: h, dpr };
+  const scale = Math.min(dpr, (MAX_SIDE[preset] || 1920) / Math.max(w, h));
+  return { width: Math.floor(w * scale / 8) * 8, height: Math.round(h * scale / 2) * 2, dpr };
 }
 
 function showDevice() {
   const d = deviceSize();
   $('#device-size').textContent = `${d.width} × ${d.height}`;
-  $('#device-detail').textContent = `Detected from this screen (${d.dpr === 1 ? 'standard' : d.dpr + '×'} pixel density). The monitor follows when you rotate or resize.`;
+  $('#device-detail').textContent = `Fits this screen (the preset sets the sharpness). The monitor follows when you rotate or resize.`;
 }
 
 function showPresets() {
@@ -285,6 +288,7 @@ for (const b of document.querySelectorAll('[data-preset]'))
     preset = b.dataset.preset;
     try { localStorage.setItem('demirror.preset', preset); } catch {}
     showPresets();
+    showDevice();
   };
 $('#go').onclick = start;
 $('#create').onsubmit = (e) => { e.preventDefault(); create(false); };

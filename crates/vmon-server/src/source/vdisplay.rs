@@ -11,8 +11,13 @@ use std::{
     time::Duration,
 };
 
+use std::{sync::mpsc, thread};
+
 use anyhow::{Context, Result, bail};
-use vmon_proto::vdisplay::{Request, Response, SOCKET_PATH};
+use vmon_proto::{
+    input::InputEvent,
+    vdisplay::{Request, Response, SOCKET_PATH},
+};
 
 struct Connection {
     reader: BufReader<UnixStream>,
@@ -113,6 +118,36 @@ impl super::Source for VirtualSource {
         out.resize((frame.stride * frame.height) as usize, 0);
         self.frame.read_exact_at(out, 0)?;
         Ok((frame.width, frame.height))
+    }
+
+    /// Input goes to the daemon on a connection of its own, written as it comes (the daemon
+    /// doesn't answer it), so it never waits behind a capture.
+    fn input(&mut self) -> Option<mpsc::Sender<InputEvent>> {
+        let mut connection = match Connection::open() {
+            Ok(connection) => connection,
+            Err(e) => {
+                tracing::warn!("no input for {}: {e:#}", self.display);
+                return None;
+            }
+        };
+        let (events, received) = mpsc::channel::<InputEvent>();
+        let name = self.display.clone();
+        thread::Builder::new()
+            .name(format!("input-{name}"))
+            .spawn(move || {
+                for event in received {
+                    let request = Request::Input { display: name.clone(), event };
+                    let sent = serde_json::to_string(&request)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|line| Ok(writeln!(connection.writer, "{line}")?));
+                    if let Err(e) = sent {
+                        tracing::warn!("input for {name} stopped: {e:#}");
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(events)
     }
 
     /// Updates the display's mode hint; the desktop picks the closest mode it offers.

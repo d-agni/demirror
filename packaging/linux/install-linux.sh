@@ -1,12 +1,17 @@
 #!/bin/sh
 # Installs demirror: the app (with a menu entry), the command-line server and client, and
 # the virtual display daemon as a system service.
-# Usage: sudo packaging/linux/install-linux.sh [USER...]   (default: the user running sudo)
+# Usage: sudo ./install-linux.sh [USER...]   (default: the user running sudo)
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-root=$(cd "$here/../.." && pwd)
-release="$root/target/release"
+# From an unpacked release the programs sit next to this script; in the source tree they're
+# in target/release.
+if [ -x "$here/vmon-vdisplayd" ]; then
+    release="$here"
+else
+    release="$(cd "$here/../.." && pwd)/target/release"
+fi
 bin="$release/vmon-vdisplayd"
 
 if [ "$(id -u)" -ne 0 ]; then

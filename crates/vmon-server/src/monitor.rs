@@ -17,7 +17,7 @@ use axum::body::Bytes;
 use jpeg_encoder::{ColorType, Encoder};
 use parking_lot::Mutex;
 use tokio::sync::watch;
-use vmon_proto::{MonitorInfo, MonitorSpec, SourceSpec};
+use vmon_proto::{MonitorInfo, MonitorSpec, SourceSpec, input::InputEvent};
 
 use crate::source::{self, Source, Synthetic};
 
@@ -40,6 +40,8 @@ struct Monitor {
     size: Arc<AtomicU64>,
     /// New viewer sizes for the source (`Source::resize`).
     resize: mpsc::Sender<(u32, u32)>,
+    /// Viewers' input, when the source takes it and the host allows it.
+    input: Option<mpsc::Sender<InputEvent>>,
     /// Display created by `OutputCommands::create`, removed on close.
     created_output: Option<String>,
 }
@@ -54,6 +56,8 @@ pub struct MonitorManager {
     monitors: Mutex<BTreeMap<u32, Monitor>>,
     next_id: AtomicU32,
     commands: OutputCommands,
+    /// Viewers may control this computer (pointer, keys) on monitors that take input.
+    allow_input: AtomicBool,
 }
 
 impl MonitorManager {
@@ -62,6 +66,35 @@ impl MonitorManager {
             monitors: Mutex::default(),
             next_id: AtomicU32::new(1),
             commands,
+            allow_input: AtomicBool::new(true),
+        }
+    }
+
+    pub fn allow_input(&self) -> bool {
+        self.allow_input.load(Ordering::Relaxed)
+    }
+
+    /// Whether viewers may control this computer; takes effect at once for every monitor.
+    pub fn set_allow_input(&self, allow: bool) {
+        self.allow_input.store(allow, Ordering::Relaxed);
+    }
+
+    /// A monitor's info as viewers see it: input only while the host allows it.
+    fn shown_info(&self, monitor: &Monitor) -> MonitorInfo {
+        let mut info = monitor.current_info();
+        info.input &= self.allow_input();
+        info
+    }
+
+    /// A viewer's input for monitor `id`; dropped if the monitor doesn't take input.
+    pub fn input(&self, id: u32, event: InputEvent) -> bool {
+        if !self.allow_input() || !event.is_valid() {
+            return false;
+        }
+        let monitors = self.monitors.lock();
+        match monitors.get(&id).and_then(|m| m.input.as_ref()) {
+            Some(input) => input.send(event).is_ok(),
+            None => false,
         }
     }
 
@@ -73,7 +106,7 @@ impl MonitorManager {
         self.monitors
             .lock()
             .values()
-            .map(Monitor::current_info)
+            .map(|m| self.shown_info(m))
             .collect()
     }
 
@@ -81,7 +114,7 @@ impl MonitorManager {
         let monitors = self.monitors.lock();
         let monitor = monitors.get(&id)?;
         let rx = monitor.frames.subscribe();
-        Some((monitor.current_info(), rx))
+        Some((self.shown_info(monitor), rx))
     }
 
     /// Creates a monitor and captures its first frame. Blocking.
@@ -119,8 +152,8 @@ impl MonitorManager {
             .recv()
             .map_err(|_| anyhow!("capture thread died"))
             .and_then(|r| r);
-        let (width, height) = match first {
-            Ok(size) => size,
+        let ((width, height), input) = match first {
+            Ok(first) => first,
             Err(e) => {
                 if let Some(name) = &created_output {
                     self.destroy_output(name);
@@ -142,6 +175,7 @@ impl MonitorManager {
             quality: spec.quality,
             source: spec.source,
             viewers: 0,
+            input: input.is_some(),
         };
         tracing::info!(id, name = info.name, width, height, "monitor created");
         self.monitors.lock().insert(
@@ -152,6 +186,7 @@ impl MonitorManager {
                 stop,
                 size,
                 resize,
+                input,
                 created_output,
             },
         );
@@ -209,6 +244,7 @@ impl Monitor {
             viewers: self.frames.receiver_count(),
             width,
             height,
+            input: self.input.is_some(),
             ..self.info.clone()
         }
     }
@@ -248,7 +284,11 @@ struct Shared {
     resize: mpsc::Receiver<(u32, u32)>,
 }
 
-fn capture_loop(id: u32, spec: MonitorSpec, shared: Shared, ready: mpsc::Sender<Result<(u32, u32)>>) {
+/// What the capture thread reports once the source is open: the first frame's size and
+/// where input for it goes.
+type Ready = Result<((u32, u32), Option<mpsc::Sender<InputEvent>>)>;
+
+fn capture_loop(id: u32, spec: MonitorSpec, shared: Shared, ready: mpsc::Sender<Ready>) {
     let Shared { frames, stop, size, resize } = shared;
     let mut pixels = Vec::new();
     let opened = (|| -> Result<_> {
@@ -263,8 +303,9 @@ fn capture_loop(id: u32, spec: MonitorSpec, shared: Shared, ready: mpsc::Sender<
         Ok((source, (w, h)))
     })();
     let mut source = match opened {
-        Ok((source, size)) => {
-            let _ = ready.send(Ok(size));
+        Ok((mut source, size)) => {
+            let input = source.input();
+            let _ = ready.send(Ok((size, input)));
             source
         }
         Err(e) => {

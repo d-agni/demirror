@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod input;
+
 pub const DEFAULT_PORT: u16 = 7878;
 
 /// mDNS service type hosts advertise themselves as, for viewers to find them on the network.
@@ -91,6 +93,9 @@ pub struct MonitorInfo {
     pub source: SourceSpec,
     /// Number of clients currently viewing.
     pub viewers: usize,
+    /// Viewers may control the host through this monitor (pointer, keys).
+    #[serde(default)]
+    pub input: bool,
 }
 
 /// A screen the server can capture.
@@ -132,6 +137,10 @@ pub mod vdisplay {
     /// device is enabled; rewritten when the viewer's size changes.
     pub const MODE_HINT_DIR: &str = "/run/vkms-mode";
 
+    /// Input hints for desktops: `<dir>/<display name>` lists (one a line) the input devices
+    /// that point at that display: their absolute positions are positions on it.
+    pub const INPUT_HINT_DIR: &str = "/run/vkms-input";
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "op", rename_all = "snake_case")]
     pub enum Request {
@@ -144,6 +153,9 @@ pub mod vdisplay {
         Capture,
         /// The viewer's size changed: update the display's mode hint.
         Resize { width: u32, height: u32 },
+        /// Input for a display this user created (on any connection: the server sends input
+        /// on its own one, so it never waits behind a capture). Not answered.
+        Input { display: String, event: crate::input::InputEvent },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

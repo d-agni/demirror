@@ -28,6 +28,8 @@ pub struct Config {
     pub commands: OutputCommands,
     /// Announce this host on the local network (mDNS) so viewers find it.
     pub advertise: bool,
+    /// Viewers may control this computer (pointer, keys) through virtual monitors.
+    pub allow_input: bool,
 }
 
 /// A running server; stopped (monitors closed, displays unplugged) when dropped.
@@ -50,6 +52,7 @@ impl Server {
         let port = listener.local_addr()?.port();
 
         let manager = Arc::new(MonitorManager::new(config.commands));
+        manager.set_allow_input(config.allow_input);
         let app = web::App { manager: manager.clone(), token: config.token.clone() };
         let (shutdown, stopped) = oneshot::channel::<()>();
         let thread = thread::Builder::new().name("demirror-server".into()).spawn(move || {

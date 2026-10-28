@@ -8,6 +8,8 @@ mod daemon;
 #[cfg(target_os = "linux")]
 mod kms;
 #[cfg(target_os = "linux")]
+mod uinput;
+#[cfg(target_os = "linux")]
 mod vkms;
 
 #[cfg(not(target_os = "linux"))]
@@ -34,7 +36,7 @@ mod linux {
     use clap::{Parser, Subcommand};
     use vmon_proto::vdisplay::SOCKET_PATH;
 
-    use crate::{daemon, kms, vkms};
+    use crate::{daemon, kms, uinput, vkms};
 
     #[derive(Parser)]
     #[command(version, about = "Virtual display daemon for demirror (Linux, VKMS)")]
@@ -173,9 +175,13 @@ mod linux {
             let _ = card.destroy_framebuffer(fb);
             let _ = card.destroy_dumb_buffer(buffer);
         }
+        match uinput::Inputs::create(&display.name) {
+            Ok(inputs) => println!("5. input devices created ({} and its keyboard)", inputs.pointer_name()),
+            Err(e) => bail!("input devices: {e:#}"),
+        }
         drop(card);
         drop(display);
-        println!("5. virtual display removed\nPASS");
+        println!("6. virtual display removed\nPASS");
         Ok(())
     }
 }

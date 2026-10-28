@@ -13,7 +13,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use vmon_proto::{MonitorInfo, MonitorSpec, Size, SourcesInfo};
+use vmon_proto::{MonitorInfo, MonitorSpec, Size, SourcesInfo, input::ClientMessage};
 
 use crate::{
     monitor::{FrameRx, MonitorManager},
@@ -154,14 +154,16 @@ fn not_found(id: u32) -> (StatusCode, Json<serde_json::Value>) {
 
 async fn stream(State(app): State<App>, Path(id): Path<u32>, ws: WebSocketUpgrade) -> Response {
     match app.manager.subscribe(id) {
-        Some((info, rx)) => ws.on_upgrade(move |socket| send_frames(socket, info, rx)),
+        Some((info, rx)) => ws.on_upgrade(move |socket| send_frames(socket, app, info, rx)),
         None => not_found(id).into_response(),
     }
 }
 
 /// Sends the monitor info as a text message, then every new frame as a
 /// binary JPEG. A slow client simply skips frames: the channel keeps only the latest.
-async fn send_frames(mut socket: WebSocket, info: MonitorInfo, mut rx: FrameRx) {
+/// Text messages from the viewer are its input (`ClientMessage`).
+async fn send_frames(mut socket: WebSocket, app: App, info: MonitorInfo, mut rx: FrameRx) {
+    let id = info.id;
     let Ok(info) = serde_json::to_string(&info) else {
         return;
     };
@@ -183,6 +185,11 @@ async fn send_frames(mut socket: WebSocket, info: MonitorInfo, mut rx: FrameRx) 
             }
             message = socket.recv() => match message {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => return,
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(message) = serde_json::from_str::<ClientMessage>(&text) {
+                        app.manager.input(id, message.input);
+                    }
+                }
                 _ => {}
             },
         }

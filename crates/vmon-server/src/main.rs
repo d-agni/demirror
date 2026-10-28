@@ -21,6 +21,9 @@ struct Args {
     /// Don't announce this host on the local network (mDNS).
     #[arg(long)]
     no_announce: bool,
+    /// Viewers only watch: their touch, mouse and keys don't control this computer.
+    #[arg(long)]
+    view_only: bool,
     /// Shell command that adds a display to the OS, run when a screen monitor is
     /// created without a named output. Examples: `swaymsg create_output`,
     /// `hyprctl output create headless`, or a Windows virtual display driver's tool.
@@ -48,6 +51,7 @@ async fn main() -> Result<()> {
         token: args.token,
         commands: OutputCommands { create: args.create_output_cmd, destroy: args.destroy_output_cmd },
         advertise: !args.no_announce,
+        allow_input: !args.view_only,
     })?;
     println!("demirror is running. Open on any device:");
     for url in server.urls() {

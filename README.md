@@ -22,7 +22,7 @@ client (virtual displays on Windows are on the roadmap; mirroring works).
 ## Use it
 
 **On the computer whose desktop you want to extend:** open **demirror**, page
-**Host**, and press **Start sharing**. It shows a QR code and an address such as
+**Share this computer**, and press **Start sharing**. It shows a QR code and an address such as
 `http://192.168.29.97:7878`.
 
 **On a phone or tablet:** scan the QR code (or open the address) and tap
@@ -32,12 +32,43 @@ full screen. Rotate the device or resize the window and the monitor follows.
 **Disconnect** unplugs it again. Pick **Smooth**, **Balanced**, **Sharp** or
 **Data saver** first for the frame rate and quality.
 
-**On another computer:** open **demirror**, page **Connect**. Hosts on the network
-are listed by themselves (or type the address), the screen's resolution is shown,
-and **Start monitor** opens the monitor full screen. Esc or **Disconnect** ends it,
+**On another computer:** open **demirror**, page **Use as monitor**. Computers sharing
+on the network are listed by themselves, each with its own **Start monitor** (or
+connect by address); the monitor's size is shown before it starts, and it opens full
+screen. Esc or **Disconnect** ends it,
 double-click switches between full screen and a window.
 
-The Host page lists every monitor with a live thumbnail, who's watching, and a
+**Settings** (remembered between runs): whether devices can find this computer and
+control it, a token, the port, **Share when demirror opens**, and **Open demirror when I
+log in** (Linux and Windows).
+
+**Control the host from the device.** Touch, mouse and keyboard on the viewing
+device work the computer, like a touchscreen monitor:
+
+| on the device | on the host |
+|---|---|
+| tap / click | click |
+| one-finger drag / mouse drag | drag |
+| long press, two-finger tap / right click | right click |
+| two-finger drag / mouse wheel | scroll |
+| keys (a hardware keyboard, or **Keyboard** on a phone) | the same keys |
+
+A phone or tablet's **Touch** button switches touch to **trackpad**, like a laptop's:
+a finger moves the pointer (faster the faster it moves), a tap clicks where the pointer
+is, and a long press then moving drags. Two fingers work as above. The choice is
+remembered on the device.
+
+**Size.** A monitor has the viewing screen's shape, held upright or sideways, so it fills
+the screen. Its pixels are the screen's, but the quality preset caps the longest side
+(Smooth 1600, Balanced 1920, Sharp 2560, Data saver 1280): a phone's 2400 pixels would be
+too much to draw and send smoothly. On kompact the virtual display gets exactly that size
+(kompact 22f); other desktops pick the closest size VKMS offers.
+
+The host turns this off with **Let devices control this computer** on the Share page
+(`vmon-server --view-only`). In the app's viewer, Esc then goes to the host too: leave
+with the toolbar's **Disconnect**.
+
+The Share page lists every monitor with a live thumbnail, who's watching, and a
 **Close** button. **Add test monitor** gives an animated pattern to try a device.
 
 Options: `demirror --share` starts sharing straight away (to start with your
@@ -60,6 +91,14 @@ The device's size goes to the host, which writes it as a mode hint
 device turns or resizes. A desktop that reads the hint picks the closest resolution
 the display offers (kompact does, since its step 22d); the viewer scales what is
 left. A resolution chosen in the desktop's display settings still wins.
+
+### How input reaches the host
+
+`vmon-vdisplayd` gives each virtual display two kernel input devices (uinput): an
+absolute pointer, like a virtual machine's tablet, and a keyboard. Keys and buttons
+work in any desktop. So that the pointer lands on *its* display, the daemon names it in
+`/run/vkms-input/<display>`; a desktop that reads this (kompact since step 22e) maps
+that device's positions onto that display.
 
 ## Monitor sources
 
@@ -158,3 +197,14 @@ In the window, press `F` or `F11` for full screen and `Esc` to quit.
 
 A monitor only captures and encodes while at least one client is watching it.
 Hosts announce themselves over mDNS as `_demirror._tcp` (TXT `token=required|none`).
+
+## Releases
+
+Each `v*` tag builds a release on GitHub (`.github/workflows/release.yml`):
+
+- **Linux** `demirror-<version>-linux-x86_64.tar.gz`: unpack it and run
+  `sudo ./install-linux.sh` (it installs the programs, the menu entry and the virtual
+  display service).
+- **Windows** `demirror-<version>-windows-x86_64.zip`: unpack it and run `demirror.exe`.
+  Windows can share its screens (mirroring) and be a monitor of another computer; adding
+  a virtual display there needs a driver that isn't written yet.
