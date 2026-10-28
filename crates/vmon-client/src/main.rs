@@ -192,6 +192,7 @@ fn main() -> Result<()> {
                 fps,
                 quality,
                 source,
+                ..Default::default()
             })?;
             println!(
                 "Created monitor #{} ({}x{})",

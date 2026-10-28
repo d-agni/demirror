@@ -66,8 +66,11 @@ pub(super) fn monitors() -> Vec<(String, RECT)> {
     list
 }
 
+/// The screens, the main one (at the desktop's origin) first.
 pub fn list_outputs() -> Result<Vec<OutputInfo>> {
-    Ok(monitors()
+    let mut all = monitors();
+    all.sort_by_key(|(_, r)| (r.left, r.top) != (0, 0));
+    Ok(all
         .into_iter()
         .map(|(name, r)| OutputInfo {
             description: format!(
@@ -121,6 +124,11 @@ impl GdiSource {
 }
 
 impl super::Source for GdiSource {
+    /// Mirrored, the screen is worked from the device like a touchscreen.
+    fn input(&mut self) -> Option<mpsc::Sender<InputEvent>> {
+        input(self.name.clone())
+    }
+
     fn capture(&mut self, out: &mut Vec<u8>) -> Result<(u32, u32)> {
         // Looked up on every frame: displays can move, resize or disappear.
         let Some((_, rect)) = monitors().into_iter().find(|(n, _)| *n == self.name) else {

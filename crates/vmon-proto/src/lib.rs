@@ -41,6 +41,21 @@ pub struct MonitorSpec {
     pub quality: u8,
     #[serde(default = "default_source")]
     pub source: SourceSpec,
+    /// Where a new virtual display goes next to the host's main screen, where the host
+    /// lets demirror choose (`SourcesInfo::can_place`).
+    #[serde(default)]
+    pub placement: Placement,
+}
+
+/// Where a new virtual display goes, next to the host's main screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    #[default]
+    Right,
+    Left,
+    Above,
+    Below,
 }
 
 fn default_width() -> u32 {
@@ -68,6 +83,7 @@ impl Default for MonitorSpec {
             fps: default_fps(),
             quality: default_quality(),
             source: default_source(),
+            placement: Placement::default(),
         }
     }
 }
@@ -119,6 +135,9 @@ pub struct SourcesInfo {
     pub virtual_available: bool,
     /// Which virtual display driver is used, or why none is available.
     pub virtual_detail: String,
+    /// `MonitorSpec::placement` is followed (Windows; on Linux the desktop arranges).
+    #[serde(default)]
+    pub can_place: bool,
 }
 
 /// Protocol of the Linux virtual display daemon (`vmon-vdisplayd`).
@@ -201,6 +220,9 @@ mod tests {
         let spec: MonitorSpec = serde_json::from_str(r#"{"width":800}"#).unwrap();
         assert_eq!((spec.width, spec.height, spec.fps), (800, 720, 30));
         assert_eq!(spec.source, SourceSpec::Synthetic);
+        assert_eq!(spec.placement, Placement::Right);
+        let spec: MonitorSpec = serde_json::from_str(r#"{"placement":"above"}"#).unwrap();
+        assert_eq!(spec.placement, Placement::Above);
     }
 
     #[test]

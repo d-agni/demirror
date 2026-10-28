@@ -40,13 +40,23 @@ virtual monitors into the kernel. Everything is pure Rust; no C libraries are ne
 **Start monitor**. The page detects the screen's resolution (pixel density and
 orientation included), the host plugs in a display of that size, and the page goes
 full screen. Rotate the device or resize the window and the monitor follows.
-**Disconnect** unplugs it again. Pick **Smooth**, **Balanced**, **Sharp** or
-**Data saver** first for the frame rate and quality.
+**Disconnect** unplugs it again. Before starting, choose:
+
+- **Quality:** **Smooth**, **Balanced**, **Sharp** or **Data saver** (frame rate and picture).
+- **Mode:** **Extend** adds a new screen beside the host's (more room); **Mirror** shows a
+  screen the host already has (pick which), the same picture on both.
+- **Text size:** **Normal**, **Larger** or **Largest**. Larger gives the monitor fewer
+  pixels, shown bigger, so text on a small phone is readable.
+- **Position** (Windows hosts): whether the new screen sits left, right, above or below the
+  host's main screen. Elsewhere, arrange it in the desktop's display settings.
+
+The choices are remembered on the device.
 
 **On another computer:** open **demirror**, page **Use as monitor**. Computers sharing
 on the network are listed by themselves, each with its own **Start monitor** (or
-connect by address); the monitor's size is shown before it starts, and it opens full
-screen. Esc or **Disconnect** ends it,
+connect by address), with the same **Mode**, **Quality**, **Text size** and **Position**
+choices (Mirror shows the other computer's main screen); the monitor's size is shown
+before it starts, and it opens full screen. Esc or **Disconnect** ends it,
 double-click switches between full screen and a window.
 
 **Settings** (remembered between runs): whether devices can find this computer and
@@ -127,8 +137,13 @@ On Windows, monitors come from demirror's own display driver
 kind of user-mode driver USB and wireless displays use. When a device starts a monitor,
 the driver plugs in a monitor of exactly that device's size, Windows extends the desktop
 onto it (it shows up in **Settings → Display** as *demirror*, where you can arrange it like
-any monitor), and demirror streams it. Touch, mouse and keyboard from the device work on
-it. When the device disconnects, or demirror quits or crashes, the monitor is unplugged.
+any monitor), and the driver hands demirror each frame Windows draws for it, through
+shared memory, to stream to the device. Touch, mouse and keyboard from the device work on
+it (and on a mirrored screen). When the device disconnects, or demirror quits or crashes,
+the monitor is unplugged.
+
+If something goes wrong, the app's log is `%LOCALAPPDATA%\demirror\demirror.log`
+(the path is also under **Settings → About**).
 
 Windows only loads drivers it trusts. Until demirror has a certificate from a code-signing
 authority, each release's driver is signed with its own self-signed certificate, made for

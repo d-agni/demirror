@@ -26,7 +26,15 @@ use eframe::egui::{self, Color32, RichText, vec2};
 use crate::{connect::Connect, host::Host, host::ViewRequest, settings::Settings, viewer::Viewer};
 
 fn main() -> eframe::Result {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    match log_file() {
+        // No console on Windows: what happens goes to a file.
+        Some(file) => tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init(),
+        None => tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init(),
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
     if let Some(code) = driver::run_command(&args) {
@@ -62,6 +70,17 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// Where the log goes on Windows: `%LOCALAPPDATA%\demirror\demirror.log`.
+pub fn log_path() -> Option<std::path::PathBuf> {
+    cfg!(windows).then(|| std::env::var_os("LOCALAPPDATA")).flatten().map(|dir| std::path::Path::new(&dir).join("demirror").join("demirror.log"))
+}
+
+fn log_file() -> Option<std::fs::File> {
+    let path = log_path()?;
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::File::create(path).ok()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,7 +123,7 @@ impl App {
     }
 
     fn open_viewer(&mut self, ctx: &egui::Context, (target, id, own): ViewRequest) {
-        match Viewer::open(target.clone(), id, own, self.settings.preset.max_side(), ctx) {
+        match Viewer::open(target.clone(), id, own, self.settings.sizing(), ctx) {
             Ok(viewer) => {
                 self.viewer = Some(viewer);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));

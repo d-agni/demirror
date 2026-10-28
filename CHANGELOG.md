@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 - 2026-10-28
+
+### Fixed
+- Windows: a started monitor showed only black. The display driver now hands demirror the
+  frames Windows draws for the monitor (shared memory), instead of demirror reading the
+  screen back with GDI, which stays black for such monitors (it's kept as a fallback).
+
+### Added
+- **Mode**: **Extend** (a new screen) or **Mirror** (show one of the host's screens), in
+  the browser and in the app.
+- **Text size**: Normal, Larger, Largest, for readable text on small screens.
+- **Position** of the new screen beside the host's main one (Windows hosts).
+- Touch, mouse and keyboard work on a mirrored screen on Windows too.
+- Windows: the app writes a log (`%LOCALAPPDATA%\demirror\demirror.log`, shown in Settings).
+
 ## 0.2.1 - 2026-10-28
 
 ### Fixed

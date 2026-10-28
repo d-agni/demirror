@@ -68,7 +68,7 @@ if ($LASTEXITCODE) { throw "compiling the driver failed" }
 
 $linkArgs = @("/nologo", "/DLL", "/OUT:$Out\demirror_idd.dll", "/OPT:REF", "/OPT:ICF", "/guard:cf",
               "/DYNAMICBASE", "/NXCOMPAT", "$build\demirror_idd.obj",
-              "WdfDriverStubUm.lib", "IddCxStub.lib", "ntdll.lib", "d3d11.lib", "dxgi.lib", "kernel32.lib")
+              "WdfDriverStubUm.lib", "IddCxStub.lib", "ntdll.lib", "d3d11.lib", "dxgi.lib", "kernel32.lib", "advapi32.lib")
 $linkArgs += $libs | ForEach-Object { "/LIBPATH:$_" }
 & link @linkArgs
 if ($LASTEXITCODE) { throw "linking the driver failed" }

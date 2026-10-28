@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/vmon-proto", "crates/vmon-server", "crates/vmon-client", "crates/vmon-vdisplayd", "crates/demirror"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/d-agni/demirror"

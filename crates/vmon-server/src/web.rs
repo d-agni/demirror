@@ -96,6 +96,7 @@ async fn sources(State(app): State<App>) -> Json<SourcesInfo> {
         can_create_outputs: app.manager.can_create_outputs(),
         virtual_available,
         virtual_detail,
+        can_place: source::can_place(),
     })
 }
 

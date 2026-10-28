@@ -13,7 +13,7 @@ mod wlr;
 use std::sync::mpsc;
 
 use anyhow::Result;
-use vmon_proto::{OutputInfo, input::InputEvent};
+use vmon_proto::{OutputInfo, Placement, input::InputEvent};
 
 pub use synthetic::Synthetic;
 
@@ -84,15 +84,25 @@ pub fn virtual_support() -> (bool, String) {
     )
 }
 
-/// Plugs a new virtual display into the OS and captures it.
-pub fn open_virtual(width: u32, height: u32) -> Result<Box<dyn Source>> {
+/// Whether a virtual display can be placed (`MonitorSpec::placement`); elsewhere the
+/// desktop arranges it.
+pub fn can_place() -> bool {
+    cfg!(windows)
+}
+
+/// Plugs a new virtual display into the OS, at `placement` where it can be placed, and
+/// captures it.
+pub fn open_virtual(width: u32, height: u32, placement: Placement) -> Result<Box<dyn Source>> {
     #[cfg(target_os = "linux")]
-    return Ok(Box::new(vdisplay::VirtualSource::open(width, height)?));
+    {
+        let _ = placement; // the desktop arranges it
+        return Ok(Box::new(vdisplay::VirtualSource::open(width, height)?));
+    }
     #[cfg(windows)]
-    return Ok(Box::new(idd::VirtualSource::open(width, height)?));
+    return Ok(Box::new(idd::VirtualSource::open(width, height, placement)?));
     #[allow(unreachable_code)]
     {
-        let _ = (width, height);
+        let _ = (width, height, placement);
         anyhow::bail!("virtual displays are not supported on this OS yet")
     }
 }
