@@ -133,6 +133,41 @@ pub fn evdev_key(code: &str) -> Option<u16> {
     })
 }
 
+/// PC keyboard scan code (set 1) for a `KeyboardEvent.code`, and whether it's an extended
+/// (`E0`) key: what Windows' `SendInput` takes. Pause has none (it's sent by its key code).
+pub fn pc_scancode(code: &str) -> Option<(u16, bool)> {
+    let key = evdev_key(code)?;
+    // Up to F12 the kernel's key codes are the scan codes.
+    if key <= 88 {
+        return Some((key, false));
+    }
+    let extended = match key {
+        96 => 0x1C,  // NumpadEnter
+        97 => 0x1D,  // ControlRight
+        98 => 0x35,  // NumpadDivide
+        99 => 0x37,  // PrintScreen
+        100 => 0x38, // AltRight
+        102 => 0x47, // Home
+        103 => 0x48, // ArrowUp
+        104 => 0x49, // PageUp
+        105 => 0x4B, // ArrowLeft
+        106 => 0x4D, // ArrowRight
+        107 => 0x4F, // End
+        108 => 0x50, // ArrowDown
+        109 => 0x51, // PageDown
+        110 => 0x52, // Insert
+        111 => 0x53, // Delete
+        113 => 0x20, // AudioVolumeMute
+        114 => 0x2E, // AudioVolumeDown
+        115 => 0x30, // AudioVolumeUp
+        125 => 0x5B, // MetaLeft
+        126 => 0x5C, // MetaRight
+        127 => 0x5D, // ContextMenu
+        _ => return None,
+    };
+    Some((extended, true))
+}
+
 /// The keys `evdev_key` knows, for setting up a keyboard device.
 pub fn evdev_keys() -> impl Iterator<Item = u16> {
     (1..=127u16).filter(|k| ![84, 85, 89, 90, 91, 92, 93, 94, 95, 101, 112, 116, 117, 118, 120, 121, 122, 123, 124].contains(k))
@@ -157,6 +192,25 @@ mod tests {
         assert_eq!(evdev_key("MetaLeft"), Some(125));
         for bad in ["Keya", "KeyAB", "Digit10", "F13", "Fn", "Unidentified", ""] {
             assert_eq!(evdev_key(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn scan_codes() {
+        assert_eq!(pc_scancode("KeyA"), Some((0x1E, false)));
+        assert_eq!(pc_scancode("Escape"), Some((0x01, false)));
+        assert_eq!(pc_scancode("F12"), Some((0x58, false)));
+        assert_eq!(pc_scancode("ArrowUp"), Some((0x48, true)));
+        assert_eq!(pc_scancode("ControlRight"), Some((0x1D, true)));
+        assert_eq!(pc_scancode("Pause"), None);
+        // Every key but Pause can be typed on Windows.
+        let missing: Vec<u16> = evdev_keys().filter(|k| *k != 119 && *k > 88).collect();
+        let known = ["NumpadEnter", "ControlRight", "NumpadDivide", "PrintScreen", "AltRight", "Home", "ArrowUp", "PageUp",
+            "ArrowLeft", "ArrowRight", "End", "ArrowDown", "PageDown", "Insert", "Delete", "AudioVolumeMute",
+            "AudioVolumeDown", "AudioVolumeUp", "MetaLeft", "MetaRight", "ContextMenu"];
+        assert_eq!(missing.len(), known.len());
+        for code in known {
+            assert!(pc_scancode(code).is_some_and(|(_, e)| e), "{code}");
         }
     }
 

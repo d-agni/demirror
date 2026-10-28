@@ -7,10 +7,14 @@
 //! `demirror --share` starts sharing at once (for starting with the session);
 //! `demirror --connect <address>` opens Use as monitor with the address filled in, and with
 //! `--start` starts the monitor right away (a tablet kept as a second screen).
+//! On Windows, `--install-driver` and `--uninstall-driver` (as administrator) add and remove
+//! the display driver.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod connect;
+#[cfg(windows)]
+mod driver;
 mod host;
 mod net;
 mod settings;
@@ -23,15 +27,20 @@ use crate::{connect::Connect, host::Host, host::ViewRequest, settings::Settings,
 
 fn main() -> eframe::Result {
     tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if let Some(code) = driver::run_command(&args) {
+        std::process::exit(code);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("demirror")
             .with_app_id("demirror")
             .with_inner_size([1000.0, 720.0])
-            .with_min_inner_size([640.0, 480.0]),
+            .with_min_inner_size([640.0, 480.0])
+            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../../packaging/icons/demirror.png")).unwrap_or_default()),
         ..Default::default()
     };
-    let args: Vec<String> = std::env::args().skip(1).collect();
     let share = args.iter().any(|a| a == "--share");
     let connect_to = args.iter().position(|a| a == "--connect").and_then(|i| args.get(i + 1)).cloned();
     let start = args.iter().any(|a| a == "--start");

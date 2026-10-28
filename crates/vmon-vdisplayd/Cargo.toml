@@ -3,12 +3,14 @@ name = "vmon-vdisplayd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "demirror virtual display service for Linux (VKMS)"
 
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 serde_json = "1.0.154"
-vmon-proto = { version = "0.1.0", path = "../vmon-proto" }
+vmon-proto = { version = "0.2.0", path = "../vmon-proto" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 drm = "0.15.0"

@@ -6,7 +6,20 @@ monitor, and its resolution is detected from the device's own screen.
 
 See [docs/PLAN.md](docs/PLAN.md) for the architecture and roadmap.
 
-## Install (Linux)
+## Install
+
+Download the latest [release](https://github.com/d-agni/demirror/releases).
+
+**Windows 10 or 11:** run `demirror-<version>-windows-x86_64-setup.exe`. It installs
+demirror, its display driver (so devices extend the desktop) and a firewall rule for
+devices on your network. Nothing else is needed: no runtime, no other driver. Windows
+may warn that the installer is from an unknown publisher (**More info → Run anyway**);
+see [Windows display driver](#windows-display-driver) for why. The `.zip` is the same without
+an installer: unpack it, run `demirror.exe`, and press **Install display driver** on its
+Share page when you want devices to extend the desktop.
+
+**Linux:** unpack `demirror-<version>-linux-x86_64.tar.gz` and run
+`sudo ./install-linux.sh`. From source:
 
 ```sh
 cargo build --release
@@ -16,8 +29,6 @@ sudo packaging/linux/install-linux.sh
 This installs the **demirror** app (in your applications menu), the command-line
 `vmon-server` and `vmon-client`, and `vmon-vdisplayd`, the service that plugs
 virtual monitors into the kernel. Everything is pure Rust; no C libraries are needed.
-On Windows, `cargo build --release` with the MSVC toolchain builds the app, server and
-client (virtual displays on Windows are on the roadmap; mirroring works).
 
 ## Use it
 
@@ -82,7 +93,8 @@ vmon-server                        # listens on 0.0.0.0:7878, announced on the n
 vmon-server --token mysecret       # require a token from every client
 ```
 
-On Windows, allow demirror through the firewall the first time it shares.
+On Windows the installer lets demirror through the firewall; with the `.zip`, allow it the
+first time it shares.
 
 ### How the resolution is matched
 
@@ -104,9 +116,35 @@ that device's positions onto that display.
 
 | source                  | what you see                                                         | platforms |
 |-------------------------|----------------------------------------------------------------------|-----------|
-| **New virtual display** | A real secondary monitor plugged into the host: the desktop **extends** onto it | Linux (any desktop that supports hot-plugged displays); Windows next |
+| **New virtual display** | A real secondary monitor plugged into the host: the desktop **extends** onto it | Linux (any desktop that supports hot-plugged displays), Windows 10 and 11 |
 | Test pattern            | Animated pattern with the monitor number                             | all       |
 | Screen `NAME`           | Mirror of an existing screen of the host                             | Linux (Wayland), Windows |
+
+## Windows display driver
+
+On Windows, monitors come from demirror's own display driver
+([packaging/windows/driver](packaging/windows/driver)), an Indirect Display driver: the
+kind of user-mode driver USB and wireless displays use. When a device starts a monitor,
+the driver plugs in a monitor of exactly that device's size, Windows extends the desktop
+onto it (it shows up in **Settings → Display** as *demirror*, where you can arrange it like
+any monitor), and demirror streams it. Touch, mouse and keyboard from the device work on
+it. When the device disconnects, or demirror quits or crashes, the monitor is unplugged.
+
+Windows only loads drivers it trusts. Until demirror has a certificate from a code-signing
+authority, each release's driver is signed with its own self-signed certificate, made for
+that build; its private key is deleted when the build ends, so nothing else can be
+signed with it. Installing the driver adds that certificate to the computer's trusted
+certificates (*Trusted Root* and *Trusted Publishers*), and uninstalling demirror removes
+it again. Test-signing mode and turning off Secure Boot are not needed. To sign with a
+real certificate, put it in the repository's `DEMIRROR_SIGN_PFX` (base64 .pfx) and
+`DEMIRROR_SIGN_PASSWORD` secrets; the build then uses it and ships no certificate.
+
+To build the driver yourself (Visual Studio with the C++ tools; the Windows Driver Kit
+comes from NuGet):
+
+```powershell
+packaging\windows\driver\build.ps1 -Out target\driver
+```
 
 ## Virtual displays on Linux
 
@@ -157,11 +195,10 @@ vmon-server --create-output-cmd 'hyprctl output create headless' \
             --destroy-output-cmd 'hyprctl output remove {output}'
 ```
 
-**Windows:** install a virtual display driver (an IddCx driver, such as the
-open-source *Virtual Display Driver* project). Each virtual display it adds
-appears as `Screen \\.\DISPLAYn` in the source list, and you can stream it directly.
-If the driver has a command-line tool for adding and removing displays, pass it
-as `--create-output-cmd` / `--destroy-output-cmd` so monitors are created on demand.
+**Windows, another driver:** displays added by any other virtual display driver appear
+as `Screen \\.\DISPLAYn` in the source list and can be streamed directly. If it has a
+command-line tool for adding and removing displays, pass it as `--create-output-cmd` /
+`--destroy-output-cmd` so monitors are created on demand.
 
 With these options set, choose **New display** in the web UI, or run `vmon-client new --screen new`.
 The display is removed again when the monitor is closed or the server stops.
@@ -200,11 +237,23 @@ Hosts announce themselves over mDNS as `_demirror._tcp` (TXT `token=required|non
 
 ## Releases
 
-Each `v*` tag builds a release on GitHub (`.github/workflows/release.yml`):
+Every push builds and tests demirror for Linux and Windows
+(`.github/workflows/build.yml`); a `v*` tag also publishes a GitHub release with:
 
-- **Linux** `demirror-<version>-linux-x86_64.tar.gz`: unpack it and run
-  `sudo ./install-linux.sh` (it installs the programs, the menu entry and the virtual
-  display service).
-- **Windows** `demirror-<version>-windows-x86_64.zip`: unpack it and run `demirror.exe`.
-  Windows can share its screens (mirroring) and be a monitor of another computer; adding
-  a virtual display there needs a driver that isn't written yet.
+- `demirror-<version>-windows-x86_64-setup.exe`: the Windows installer (programs,
+  display driver, firewall rule).
+- `demirror-<version>-windows-x86_64.zip`: the same, without an installer.
+- `demirror-<version>-linux-x86_64.tar.gz`: unpack it and run `sudo ./install-linux.sh`
+  (it installs the programs, the menu entry and the virtual display service).
+- `SHA256SUMS.txt`: checksums of the above.
+
+The Windows build checks that the programs and the driver need nothing that Windows
+doesn't come with (the C runtime is built in).
+
+To release: set the version in `Cargo.toml`, add it to `CHANGELOG.md`, then
+`git tag v<version> && git push origin v<version>`.
+
+## License
+
+demirror is licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.

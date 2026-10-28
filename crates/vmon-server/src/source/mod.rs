@@ -1,5 +1,7 @@
 //! Pixel sources that back a virtual monitor.
 
+#[cfg(windows)]
+mod idd;
 mod synthetic;
 #[cfg(target_os = "linux")]
 mod vdisplay;
@@ -73,6 +75,8 @@ pub fn open_screen(output: Option<&str>) -> Result<Box<dyn Source>> {
 pub fn virtual_support() -> (bool, String) {
     #[cfg(target_os = "linux")]
     return vdisplay::support();
+    #[cfg(windows)]
+    return idd::support();
     #[allow(unreachable_code)]
     (
         false,
@@ -84,6 +88,8 @@ pub fn virtual_support() -> (bool, String) {
 pub fn open_virtual(width: u32, height: u32) -> Result<Box<dyn Source>> {
     #[cfg(target_os = "linux")]
     return Ok(Box::new(vdisplay::VirtualSource::open(width, height)?));
+    #[cfg(windows)]
+    return Ok(Box::new(idd::VirtualSource::open(width, height)?));
     #[allow(unreachable_code)]
     {
         let _ = (width, height);

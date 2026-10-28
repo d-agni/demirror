@@ -50,7 +50,7 @@ What a "virtual monitor" can show depends on the host OS, so each OS gets a back
 | `gnome`        | Mutter `ScreenCast.RecordVirtual` (real virtual monitor) + PipeWire           | Phase 2 |
 | `kde`          | KWin `zkde_screencast` virtual output                                         | Phase 2 |
 | `windows`      | GDI capture of any display (pure Rust, `windows-sys`). Paired with a virtual display driver it **extends** the desktop: the driver adds the monitor, demirror streams it (`--create-output-cmd` runs the driver's tool) | Phase 1 |
-| `windows-idd`  | Own IddCx driver with direct control + DXGI Desktop Duplication               | Phase 3 |
+| `windows-idd`  | Own IddCx driver (`packaging/windows/driver`): made-to-measure monitors added and removed over IOCTLs, captured with GDI, input with `SendInput`. Still to do: frames straight from the driver instead of GDI | Phase 3 (driver done) |
 | `macos`        | `CGVirtualDisplay` + ScreenCaptureKit                                         | Phase 3 |
 
 > To make a real *extra* monitor, the OS (or its compositor) has to provide a
