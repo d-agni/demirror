@@ -30,6 +30,8 @@ pub struct Host {
     thumbs: HashMap<u32, TextureHandle>,
     thumbs_at: Option<Instant>,
     copied_at: Option<Instant>,
+    /// Installing the display driver (Windows): `None` while it runs, then why it failed.
+    installing: Arc<Mutex<Option<Option<String>>>>,
 }
 
 impl Host {
@@ -42,6 +44,7 @@ impl Host {
             thumbs: HashMap::new(),
             thumbs_at: None,
             copied_at: None,
+            installing: Arc::default(),
         }
     }
 
@@ -210,6 +213,8 @@ impl Host {
                 if cfg!(target_os = "linux") {
                     ui.label("Install the display service once (it plugs monitors into the kernel):");
                     ui.label(RichText::new("sudo packaging/linux/install-linux.sh").monospace());
+                } else if cfg!(windows) {
+                    self.driver_ui(ui);
                 } else {
                     ui.label("On this system demirror can mirror screens; extending the desktop needs a virtual display driver.");
                 }
@@ -227,7 +232,52 @@ impl Host {
         });
     }
 
+    /// Installing the display driver, on Windows.
+    fn driver_ui(&mut self, ui: &mut egui::Ui) {
+        #[cfg(windows)]
+        {
+            if !crate::driver::available() {
+                ui.label("This copy of demirror came without its display driver; reinstall it from the release to extend the desktop.");
+                return;
+            }
+            ui.label("Install demirror's display driver once, and devices extend this desktop like real monitors.");
+            let state = self.installing.lock().unwrap().clone();
+            ui.horizontal(|ui| match state {
+                Some(None) => {
+                    ui.spinner();
+                    ui.label("Installing… (Windows asks for permission)");
+                }
+                _ => {
+                    if widgets::primary_button(ui, "Install display driver", true).clicked() {
+                        *self.installing.lock().unwrap() = Some(None);
+                        let (installing, ctx) = (self.installing.clone(), ui.ctx().clone());
+                        thread::spawn(move || {
+                            let result = crate::driver::install_elevated();
+                            *installing.lock().unwrap() = match result {
+                                Ok(()) => None,
+                                Err(e) => Some(Some(format!("{e:#}"))),
+                            };
+                            ctx.request_repaint();
+                        });
+                        // Look again once it's done.
+                        self.support_checked = None;
+                    }
+                }
+            });
+            if let Some(Some(error)) = state {
+                ui.label(RichText::new(error).color(ui.visuals().error_fg_color));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = ui;
+    }
+
     fn check_support(&mut self, ctx: &egui::Context) {
+        if matches!(*self.installing.lock().unwrap(), Some(None)) {
+            // Installing: check again when it's done.
+            self.support_checked = None;
+            return;
+        }
         if self.support_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(10)) {
             return;
         }

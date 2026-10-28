@@ -1,0 +1,59 @@
+; demirror virtual display driver: monitors for phones, tablets and other computers.
+; build.ps1 fills in DriverVer.
+
+[Version]
+PnpLockDown = 1
+Signature = "$Windows NT$"
+Class = Display
+ClassGUID = {4D36E968-E325-11CE-BFC1-08002BE10318}
+ClassVer = 2.0
+Provider = %Provider%
+CatalogFile = demirror_idd.cat
+DriverVer = @DRIVERVER@
+
+[Manufacturer]
+%Provider% = demirror, NTamd64
+
+[demirror.NTamd64]
+%DeviceName% = demirror_Install, Root\demirror_idd
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+demirror_idd.dll = 1
+
+[DestinationDirs]
+demirror_Files = 13
+
+[demirror_Files]
+demirror_idd.dll
+
+[demirror_Install.NT]
+CopyFiles = demirror_Files
+
+[demirror_Install.NT.HW]
+AddReg = demirror_HW
+
+[demirror_HW]
+HKR, , "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "demirrorIddGroup"
+; demirror runs as the signed-in user: let interactive users open the device to add monitors.
+HKR, , "Security", , "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+
+[demirror_Install.NT.Wdf]
+UmdfService = demirror_idd, demirror_Service
+UmdfServiceOrder = demirror_idd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+
+[demirror_Service]
+UmdfLibraryVersion = 2.15.0
+ServiceBinary = %13%\demirror_idd.dll
+UmdfExtensions = IddCx0102
+
+[Strings]
+Provider = "demirror"
+DiskName = "demirror display driver"
+DeviceName = "demirror virtual display"
+REG_MULTI_SZ = 0x00010000
+REG_SZ = 0x00000000

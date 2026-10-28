@@ -3,6 +3,8 @@ name = "vmon-vdisplayd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "demirror virtual display service for Linux (VKMS)"
 
 [dependencies]
 anyhow = "1.0.104"

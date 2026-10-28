@@ -36,6 +36,10 @@ for program in demirror vmon-server vmon-client; do
     fi
 done
 install -m 0644 "$here/demirror.desktop" /usr/share/applications/demirror.desktop
+icon="$here/demirror.png"
+[ -f "$icon" ] || icon="$here/../icons/demirror.png"
+install -D -m 0644 "$icon" /usr/share/icons/hicolor/256x256/apps/demirror.png
+gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
 sed "s|@USERS@|$users|" "$here/demirror-vdisplayd.service" > /etc/systemd/system/demirror-vdisplayd.service
 systemctl daemon-reload
 systemctl enable demirror-vdisplayd.service

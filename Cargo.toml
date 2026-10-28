@@ -6,6 +6,8 @@ members = ["crates/vmon-proto", "crates/vmon-server", "crates/vmon-client", "cra
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/d-agni/demirror"
+homepage = "https://github.com/d-agni/demirror"
 
 [profile.release]
 lto = "thin"
