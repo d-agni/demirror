@@ -5,19 +5,20 @@
 
 use std::{
     mem, ptr,
-    sync::{Once, mpsc},
+    sync::{Arc, Mutex, Once, mpsc},
     thread,
+    time::Duration,
 };
 
 use anyhow::{Result, anyhow, bail};
 use vmon_proto::{
     OutputInfo,
-    input::{Button, InputEvent, pc_scancode},
+    input::{Button, InputEvent, MAX_TOUCHES, TouchPhase, pc_scancode},
 };
 use windows_sys::Win32::{
-    Foundation::{LPARAM, RECT, TRUE},
+    Foundation::{LPARAM, POINT, RECT, TRUE},
     Graphics::Gdi::*,
-    UI::{HiDpi::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    UI::{HiDpi::*, Input::KeyboardAndMouse::*, Input::Pointer::*, WindowsAndMessaging::*},
 };
 
 /// Without this Windows reports scaled (not physical) monitor sizes.
@@ -126,7 +127,7 @@ impl GdiSource {
 impl super::Source for GdiSource {
     /// Mirrored, the screen is worked from the device like a touchscreen.
     fn input(&mut self) -> Option<mpsc::Sender<InputEvent>> {
-        input(self.name.clone())
+        input(Arc::new(Mutex::new(self.name.clone())))
     }
 
     fn capture(&mut self, out: &mut Vec<u8>) -> Result<(u32, u32)> {
@@ -236,24 +237,157 @@ impl Drop for GdiSource {
 
 /// Viewers' input for the display `name`: clicked and typed on this desktop with `SendInput`,
 /// the pointer placed on that display. (Windows doesn't let it reach programs running as
-/// administrator.)
-pub(super) fn input(name: String) -> Option<mpsc::Sender<InputEvent>> {
+/// administrator.) `name` may change, when the display is replaced.
+pub(super) fn input(name: Arc<Mutex<String>>) -> Option<mpsc::Sender<InputEvent>> {
     let (events, received) = mpsc::channel::<InputEvent>();
     thread::Builder::new()
-        .name(format!("input-{name}"))
+        .name("input".into())
         .spawn(move || {
-            for event in received {
-                for input in inputs(&name, &event) {
+            let mut touch = Touch::default();
+            loop {
+                let event = match received.recv_timeout(Touch::KEEP_ALIVE) {
+                    Ok(event) => event,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        touch.keep_alive();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                let display = name.lock().unwrap().clone();
+                if let InputEvent::Touch { id, phase, x, y } = event {
+                    if let Some(point) = pixel(&display, x, y) {
+                        touch.event(id, phase, point);
+                    }
+                    continue;
+                }
+                for input in inputs(&display, &event) {
                     unsafe { SendInput(1, &input, mem::size_of::<INPUT>() as i32) };
                 }
             }
+            touch.lift_all();
         })
         .ok()?;
     Some(events)
 }
 
+/// The pixel of the desktop at (`x`, `y`) of `display`'s picture.
+fn pixel(display: &str, x: f32, y: f32) -> Option<POINT> {
+    let (_, r) = monitors().into_iter().find(|(n, _)| n == display)?;
+    Some(POINT {
+        x: r.left + (x * (r.right - r.left - 1) as f32).round() as i32,
+        y: r.top + (y * (r.bottom - r.top - 1) as f32).round() as i32,
+    })
+}
+
+/// Viewers' fingers as this computer's touchscreen (`InjectTouchInput`): programs get real
+/// touch, so they scroll, zoom, flick and press-and-hold as they do for a touchscreen.
+#[derive(Default)]
+struct Touch {
+    /// Where each finger that's down is.
+    fingers: [Option<POINT>; MAX_TOUCHES as usize],
+    /// `Some(worked)` once touch injection was set up.
+    ready: Option<bool>,
+    /// An injection failed (said once).
+    failed: bool,
+}
+
+// TOUCH_MASK_* (winuser.h): which of a contact's details are given.
+const TOUCH_MASK_CONTACTAREA: u32 = 0x1;
+const TOUCH_MASK_PRESSURE: u32 = 0x4;
+
+impl Touch {
+    /// A finger held still is re-sent this often: Windows drops contacts it stops hearing of.
+    const KEEP_ALIVE: Duration = Duration::from_millis(100);
+
+    fn event(&mut self, id: u8, phase: TouchPhase, point: POINT) {
+        let id = id as usize;
+        let (down, moving) = (POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT, self.fingers[id].is_some());
+        let flags = match phase {
+            TouchPhase::Down | TouchPhase::Move if moving => POINTER_FLAG_UPDATE | down,
+            TouchPhase::Down => POINTER_FLAG_DOWN | down,
+            // A move for a finger that isn't down (its down was lost): ignored.
+            TouchPhase::Move => return,
+            TouchPhase::Up | TouchPhase::Cancel if !moving => return,
+            TouchPhase::Up => POINTER_FLAG_UP,
+            TouchPhase::Cancel => POINTER_FLAG_UP | POINTER_FLAG_CANCELED,
+        };
+        self.fingers[id] = Some(point);
+        self.inject(Some((id, flags)));
+        if matches!(phase, TouchPhase::Up | TouchPhase::Cancel) {
+            self.fingers[id] = None;
+        }
+    }
+
+    fn keep_alive(&mut self) {
+        if self.fingers.iter().any(Option::is_some) {
+            self.inject(None);
+        }
+    }
+
+    /// Lifts every finger still down (the viewer went).
+    fn lift_all(&mut self) {
+        for id in 0..self.fingers.len() {
+            if self.fingers[id].is_some() {
+                self.inject(Some((id, POINTER_FLAG_UP | POINTER_FLAG_CANCELED)));
+                self.fingers[id] = None;
+            }
+        }
+    }
+
+    /// Sends every finger that's down, as Windows wants each frame: `changed` with its own
+    /// flags, the others as still in contact.
+    fn inject(&mut self, changed: Option<(usize, POINTER_FLAGS)>) {
+        if !*self.ready.get_or_insert_with(|| {
+            let ok = unsafe { InitializeTouchInjection(MAX_TOUCHES as u32, TOUCH_FEEDBACK_DEFAULT) } != 0;
+            if !ok {
+                tracing::warn!("touch can't be injected: {}", std::io::Error::last_os_error());
+            }
+            ok
+        }) {
+            return;
+        }
+        let contacts: Vec<POINTER_TOUCH_INFO> = self
+            .fingers
+            .iter()
+            .enumerate()
+            .filter_map(|(id, point)| {
+                let flags = match changed {
+                    Some((changed, flags)) if changed == id => flags,
+                    _ => POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT,
+                };
+                point.map(|p| contact(id as u32, p, flags))
+            })
+            .collect();
+        if contacts.is_empty() {
+            return;
+        }
+        if unsafe { InjectTouchInput(contacts.len() as u32, contacts.as_ptr()) } == 0 {
+            let e = std::io::Error::last_os_error();
+            if !self.failed {
+                tracing::warn!("touch injection failed: {e}");
+            }
+            self.failed = true;
+        }
+    }
+}
+
+fn contact(id: u32, point: POINT, flags: POINTER_FLAGS) -> POINTER_TOUCH_INFO {
+    let mut info: POINTER_TOUCH_INFO = unsafe { mem::zeroed() };
+    info.pointerInfo.pointerType = PT_TOUCH;
+    info.pointerInfo.pointerId = id;
+    info.pointerInfo.pointerFlags = flags;
+    info.pointerInfo.ptPixelLocation = point;
+    info.touchMask = TOUCH_MASK_CONTACTAREA | TOUCH_MASK_PRESSURE;
+    // A fingertip.
+    info.rcContact = RECT { left: point.x - 4, top: point.y - 4, right: point.x + 4, bottom: point.y + 4 };
+    info.pressure = 32000;
+    info
+}
+
 fn inputs(display: &str, event: &InputEvent) -> Vec<INPUT> {
     match *event {
+        // Sent to `Touch`.
+        InputEvent::Touch { .. } => Vec::new(),
         InputEvent::Move { x, y } => {
             let Some((_, r)) = monitors().into_iter().find(|(n, _)| n == display) else {
                 return Vec::new();

@@ -114,6 +114,8 @@ pub struct Settings {
     pub mode: Mode,
     pub zoom: Zoom,
     pub placement: Placement,
+    /// The new screen becomes the other computer's main display while it's on.
+    pub main_display: bool,
 }
 
 impl Default for Settings {
@@ -131,6 +133,7 @@ impl Default for Settings {
             mode: Mode::Extend,
             zoom: Zoom::Normal,
             placement: Placement::Right,
+            main_display: false,
         }
     }
 }
@@ -349,5 +352,6 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"port": 9000}"#).unwrap();
         assert_eq!((s.port, s.preset, s.allow_input), (9000, Preset::Balanced, true));
         assert_eq!((s.mode, s.zoom, s.placement), (Mode::Extend, Zoom::Normal, Placement::Right));
+        assert!(!s.main_display);
     }
 }

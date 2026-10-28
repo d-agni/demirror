@@ -201,6 +201,8 @@ impl Inputs {
                 Some(key) => self.keyboard.send(&[(EV_KEY, key, *down as i32)]),
                 None => Ok(()),
             },
+            // Not offered here (`MonitorInfo::touch`): viewers send pointer and wheel.
+            InputEvent::Touch { .. } => Ok(()),
         }
     }
 }

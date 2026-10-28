@@ -84,25 +84,31 @@ pub fn virtual_support() -> (bool, String) {
     )
 }
 
+/// Whether sources that take input take touches too (`InputEvent::Touch`), as the host's
+/// own touch; elsewhere viewers send pointer and wheel.
+pub fn takes_touch() -> bool {
+    cfg!(windows)
+}
+
 /// Whether a virtual display can be placed (`MonitorSpec::placement`); elsewhere the
 /// desktop arranges it.
 pub fn can_place() -> bool {
     cfg!(windows)
 }
 
-/// Plugs a new virtual display into the OS, at `placement` where it can be placed, and
-/// captures it.
-pub fn open_virtual(width: u32, height: u32, placement: Placement) -> Result<Box<dyn Source>> {
+/// Plugs a new virtual display into the OS, at `placement` and made the main display (when
+/// `main`) where it can be placed, and captures it.
+pub fn open_virtual(width: u32, height: u32, placement: Placement, main: bool) -> Result<Box<dyn Source>> {
     #[cfg(target_os = "linux")]
     {
-        let _ = placement; // the desktop arranges it
+        let _ = (placement, main); // the desktop arranges it
         return Ok(Box::new(vdisplay::VirtualSource::open(width, height)?));
     }
     #[cfg(windows)]
-    return Ok(Box::new(idd::VirtualSource::open(width, height, placement)?));
+    return Ok(Box::new(idd::VirtualSource::open(width, height, placement, main)?));
     #[allow(unreachable_code)]
     {
-        let _ = (width, height, placement);
+        let _ = (width, height, placement, main);
         anyhow::bail!("virtual displays are not supported on this OS yet")
     }
 }

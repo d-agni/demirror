@@ -63,6 +63,13 @@ jobs:
       - name: Stage
         run: |
           Copy-Item target/release/demirror.exe, target/release/vmon-server.exe, target/release/vmon-client.exe, README.md, LICENSE-MIT, LICENSE-APACHE dist/stage/
+      - name: Sign the programs
+        # Signed with the repository's certificate, when it has one: Windows (SmartScreen,
+        # Defender) trusts signed programs, and unsigned ones can be flagged.
+        run: packaging/windows/sign.ps1 dist/stage/demirror.exe dist/stage/vmon-server.exe dist/stage/vmon-client.exe
+        env:
+          DEMIRROR_SIGN_PFX: ${{ secrets.DEMIRROR_SIGN_PFX }}
+          DEMIRROR_SIGN_PASSWORD: ${{ secrets.DEMIRROR_SIGN_PASSWORD }}
       - name: Needs nothing but Windows
         run: packaging/windows/check-dependencies.ps1 dist/stage
       - name: Package
@@ -75,8 +82,17 @@ jobs:
           if (-not (Test-Path $iscc)) {
             choco install innosetup -y --no-progress | Out-Null
           }
-          & $iscc /Q "/DVersion=$version" "/DSource=$((Resolve-Path dist/$name).Path)" "/O$((Resolve-Path dist).Path)" "/F$name-setup" packaging/windows/demirror.iss
+          $isccArgs = @("/Q", "/DVersion=$version", "/DSource=$((Resolve-Path dist/$name).Path)", "/O$((Resolve-Path dist).Path)", "/F$name-setup")
+          if ($env:DEMIRROR_SIGN_PFX) {
+            # Inno Setup signs the installer and its uninstaller with this.
+            $sign = (Resolve-Path packaging/windows/sign.ps1).Path
+            $isccArgs += "/DSign", "/Sdemirror=pwsh -NoProfile -File `$q$sign`$q `$f"
+          }
+          & $iscc @isccArgs packaging/windows/demirror.iss
           if ($LASTEXITCODE) { throw "building the installer failed" }
+        env:
+          DEMIRROR_SIGN_PFX: ${{ secrets.DEMIRROR_SIGN_PFX }}
+          DEMIRROR_SIGN_PASSWORD: ${{ secrets.DEMIRROR_SIGN_PASSWORD }}
       - uses: actions/upload-artifact@v7
         with:
           name: windows

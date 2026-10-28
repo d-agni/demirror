@@ -1,11 +1,15 @@
 //! REST API, WebSocket streams and the embedded browser client.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    net::{IpAddr, SocketAddr, UdpSocket},
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
     extract::{
-        Path, Request, State,
+        ConnectInfo, Path, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, header},
@@ -13,7 +17,10 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use vmon_proto::{MonitorInfo, MonitorSpec, Size, SourcesInfo, input::ClientMessage};
+use vmon_proto::{
+    MonitorInfo, MonitorSpec, Size, SourcesInfo,
+    input::{ClientMessage, InputEvent, TouchPhase},
+};
 
 use crate::{
     monitor::{FrameRx, MonitorManager},
@@ -153,18 +160,41 @@ fn not_found(id: u32) -> (StatusCode, Json<serde_json::Value>) {
     api_error(StatusCode::NOT_FOUND, format!("no monitor {id}"))
 }
 
-async fn stream(State(app): State<App>, Path(id): Path<u32>, ws: WebSocketUpgrade) -> Response {
+async fn stream(
+    State(app): State<App>,
+    Path(id): Path<u32>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    ws: WebSocketUpgrade,
+) -> Response {
     match app.manager.subscribe(id) {
-        Some((info, rx)) => ws.on_upgrade(move |socket| send_frames(socket, app, info, rx)),
+        Some((mut info, rx)) => {
+            // A viewer on this computer only watches: its pointer over the picture would move
+            // this computer's pointer onto the monitor, and keep it there.
+            if info.input && is_this_computer(peer.ip()) {
+                tracing::info!(id, "a viewer on this computer: it only watches");
+                info.input = false;
+                info.touch = false;
+            }
+            ws.on_upgrade(move |socket| send_frames(socket, app, info, rx))
+        }
         None => not_found(id).into_response(),
     }
+}
+
+/// Whether `ip` is one of this computer's addresses (only those can be bound to).
+fn is_this_computer(ip: IpAddr) -> bool {
+    let ip = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    };
+    ip.is_loopback() || UdpSocket::bind((ip, 0)).is_ok()
 }
 
 /// Sends the monitor info as a text message, then every new frame as a
 /// binary JPEG. A slow client simply skips frames: the channel keeps only the latest.
 /// Text messages from the viewer are its input (`ClientMessage`).
 async fn send_frames(mut socket: WebSocket, app: App, info: MonitorInfo, mut rx: FrameRx) {
-    let id = info.id;
+    let (id, input) = (info.id, info.input);
     let Ok(info) = serde_json::to_string(&info) else {
         return;
     };
@@ -172,6 +202,7 @@ async fn send_frames(mut socket: WebSocket, app: App, info: MonitorInfo, mut rx:
         return;
     }
     rx.mark_changed();
+    let mut fingers = Fingers { app: &app, id, down: HashMap::new() };
     loop {
         tokio::select! {
             changed = rx.changed() => {
@@ -186,8 +217,9 @@ async fn send_frames(mut socket: WebSocket, app: App, info: MonitorInfo, mut rx:
             }
             message = socket.recv() => match message {
                 Some(Ok(Message::Close(_)) | Err(_)) | None => return,
-                Some(Ok(Message::Text(text))) => {
+                Some(Ok(Message::Text(text))) if input => {
                     if let Ok(message) = serde_json::from_str::<ClientMessage>(&text) {
+                        fingers.track(&message.input);
                         app.manager.input(id, message.input);
                     }
                 }
@@ -196,4 +228,46 @@ async fn send_frames(mut socket: WebSocket, app: App, info: MonitorInfo, mut rx:
         }
     }
     let _ = socket.send(Message::Close(None)).await;
+}
+
+/// A viewer's fingers that are down: lifted for it if it goes without lifting them (a lost
+/// connection), or they'd stay pressed on the host.
+struct Fingers<'a> {
+    app: &'a App,
+    id: u32,
+    down: HashMap<u8, (f32, f32)>,
+}
+
+impl Fingers<'_> {
+    fn track(&mut self, event: &InputEvent) {
+        if let InputEvent::Touch { id, phase, x, y } = *event {
+            match phase {
+                TouchPhase::Down | TouchPhase::Move => self.down.insert(id, (x, y)),
+                TouchPhase::Up | TouchPhase::Cancel => self.down.remove(&id),
+            };
+        }
+    }
+}
+
+impl Drop for Fingers<'_> {
+    fn drop(&mut self) {
+        for (finger, (x, y)) in self.down.drain() {
+            let lift = InputEvent::Touch { id: finger, phase: TouchPhase::Cancel, x, y };
+            self.app.manager.input(self.id, lift);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_computer() {
+        assert!(is_this_computer("127.0.0.1".parse().unwrap()));
+        assert!(is_this_computer("::1".parse().unwrap()));
+        assert!(is_this_computer("::ffff:127.0.0.1".parse().unwrap()));
+        // TEST-NET-3: nobody's address.
+        assert!(!is_this_computer("203.0.113.7".parse().unwrap()));
+    }
 }

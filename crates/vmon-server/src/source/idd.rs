@@ -9,7 +9,7 @@
 use std::{
     mem, ptr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering, fence},
         mpsc,
     },
@@ -38,7 +38,8 @@ const IOCTL_VERSION: u32 = 0x222000;
 const IOCTL_ADD: u32 = 0x222004;
 const IOCTL_REMOVE: u32 = 0x222008;
 const IOCTL_PING: u32 = 0x22200C;
-const IOCTL_RESIZE: u32 = 0x222010;
+// IOCTL_RESIZE (0x222010) isn't used: Windows turns a monitor off when its modes change, so
+// resizing replaces the monitor instead.
 
 const NOT_INSTALLED: &str = "the demirror display driver isn't installed (Share page: Install display driver)";
 
@@ -128,23 +129,146 @@ pub fn support() -> (bool, String) {
 
 pub struct VirtualSource {
     driver: Arc<Driver>,
-    id: u32,
-    output: String,
     placement: Placement,
-    /// The frames the driver copies out, if it could share them.
-    frames: Option<SharedFrames>,
+    /// The virtual display is the main display while it's on.
+    main: bool,
+    /// The main display before this one was plugged in: what it's placed beside, and what's
+    /// made the main display again when it goes.
+    previous_main: Option<String>,
+    plugged: Plugged,
+    /// The display's name for input, which follows the display when it's replaced.
+    input_output: Arc<Mutex<String>>,
     /// Whether a frame came from the driver yet; until then the screen is read with GDI.
     from_driver: bool,
     last: (u32, u32),
+}
+
+impl VirtualSource {
+    pub fn open(width: u32, height: u32, placement: Placement, main: bool) -> Result<Self> {
+        dpi_aware();
+        let driver = Arc::new(Driver::open()?);
+        let previous_main = main_display();
+        let plugged = Plugged::new(&driver, width, height)?;
+        let input_output = Arc::new(Mutex::new(plugged.output.clone()));
+        let source = Self {
+            driver,
+            placement,
+            main,
+            previous_main,
+            plugged,
+            input_output,
+            from_driver: false,
+            last: (width, height),
+        };
+        source.place(width, height);
+        Ok(source)
+    }
+
+    /// Puts the display beside the previous main one, and makes it the main one if asked.
+    /// Otherwise the previous one stays main: Windows remembers a main display per set of
+    /// monitors, and would make this one main again if it once was.
+    fn place(&self, width: u32, height: u32) {
+        let output = &self.plugged.output;
+        arrange(output, width, height, self.placement, self.previous_main.as_deref());
+        if self.main {
+            make_main(output);
+        } else if let Some(previous) = &self.previous_main
+            && main_display().as_ref() != Some(previous)
+        {
+            make_main(previous);
+        }
+    }
+}
+
+/// The main display's name: the one at the desktop's origin.
+fn main_display() -> Option<String> {
+    monitors().into_iter().find(|(_, r)| r.left == 0 && r.top == 0).map(|(name, _)| name)
+}
+
+/// Makes `output` the main display.
+fn make_main(output: &str) {
+    match unsafe { set_main(output) } {
+        Ok(()) => tracing::info!("{output} is the main display"),
+        Err(e) => tracing::warn!("{output} can't be made the main display: {e:#}"),
+    }
+}
+
+/// The main display is the one at the desktop's origin: every display moves by as much as
+/// `output` does to get there, so the arrangement stays. (As Windows' Settings do it;
+/// ChangeDisplaySettingsEx's CDS_SET_PRIMARY fails for some displays.)
+unsafe fn set_main(output: &str) -> Result<()> {
+    unsafe {
+        let flags = QDC_ONLY_ACTIVE_PATHS;
+        let (mut path_count, mut mode_count) = (0u32, 0u32);
+        if GetDisplayConfigBufferSizes(flags, &mut path_count, &mut mode_count) != 0 {
+            bail!("can't read the display arrangement");
+        }
+        let mut paths = vec![mem::zeroed::<DISPLAYCONFIG_PATH_INFO>(); path_count as usize];
+        let mut modes = vec![mem::zeroed::<DISPLAYCONFIG_MODE_INFO>(); mode_count as usize];
+        let read = QueryDisplayConfig(
+            flags,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            ptr::null_mut(),
+        );
+        if read != 0 {
+            bail!("can't read the display arrangement ({read})");
+        }
+        paths.truncate(path_count as usize);
+        modes.truncate(mode_count as usize);
+
+        let origin = paths
+            .iter()
+            .find(|path| {
+                let mut name: DISPLAYCONFIG_SOURCE_DEVICE_NAME = mem::zeroed();
+                name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                name.header.size = mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                name.header.adapterId = path.sourceInfo.adapterId;
+                name.header.id = path.sourceInfo.id;
+                let gdi = &name.viewGdiDeviceName;
+                DisplayConfigGetDeviceInfo(&mut name.header) == 0
+                    && String::from_utf16_lossy(&gdi[..gdi.iter().position(|&c| c == 0).unwrap_or(gdi.len())]) == output
+            })
+            .and_then(|path| modes.get(path.sourceInfo.Anonymous.modeInfoIdx as usize))
+            .filter(|mode| mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+            .map(|mode| mode.Anonymous.sourceMode.position)
+            .with_context(|| format!("{output} isn't on the desktop"))?;
+        for mode in &mut modes {
+            if mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+                let position = &mut mode.Anonymous.sourceMode.position;
+                position.x -= origin.x;
+                position.y -= origin.y;
+            }
+        }
+        let applied = SetDisplayConfig(
+            path_count,
+            paths.as_ptr(),
+            mode_count,
+            modes.as_ptr(),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE | SDC_ALLOW_CHANGES,
+        );
+        if applied != 0 {
+            bail!("Windows didn't take the new arrangement ({applied})");
+        }
+        Ok(())
+    }
+}
+
+/// A monitor the driver plugged in, and Windows put on the desktop.
+struct Plugged {
+    id: u32,
+    output: String,
+    /// The frames the driver copies out, if it could share them.
+    frames: Option<SharedFrames>,
     screen: GdiSource,
     /// Dropped to stop the pings.
     _pinging: mpsc::Sender<()>,
 }
 
-impl VirtualSource {
-    pub fn open(width: u32, height: u32, placement: Placement) -> Result<Self> {
-        dpi_aware();
-        let driver = Arc::new(Driver::open()?);
+impl Plugged {
+    fn new(driver: &Arc<Driver>, width: u32, height: u32) -> Result<Plugged> {
         let names = || monitors().into_iter().map(|(name, _)| name).collect::<Vec<_>>();
         let before = names();
         let id = driver
@@ -171,24 +295,26 @@ impl VirtualSource {
             }
             thread::sleep(Duration::from_millis(200));
         };
-        tracing::info!("virtual display {output} plugged in");
-        arrange(&output, width, height, placement);
+        tracing::info!("virtual display {output} plugged in at {width}x{height}");
         let frames = SharedFrames::open(id);
         if frames.is_none() {
             tracing::warn!("the display driver doesn't share {output}'s frames; reading the screen instead");
         }
-        let screen = GdiSource::open(Some(&output))?;
-        Ok(Self {
-            driver,
-            id,
-            output,
-            placement,
-            frames,
-            from_driver: false,
-            last: (width, height),
-            screen,
-            _pinging: pinging,
-        })
+        let screen = match GdiSource::open(Some(&output)) {
+            Ok(screen) => screen,
+            Err(e) => {
+                let _ = driver.ioctl(IOCTL_REMOVE, &[id]);
+                return Err(e);
+            }
+        };
+        Ok(Plugged { id, output, frames, screen, _pinging: pinging })
+    }
+
+    fn unplug(self, driver: &Driver) {
+        drop(self._pinging);
+        if let Err(e) = driver.ioctl(IOCTL_REMOVE, &[self.id]) {
+            tracing::warn!("removing virtual display {}: {e}", self.output);
+        }
     }
 }
 
@@ -207,10 +333,13 @@ fn ping(driver: Arc<Driver>, id: u32) -> mpsc::Sender<()> {
 }
 
 /// Sets `output` to `width` x `height` (Windows picks the monitor's only mode, unless it
-/// remembered another) and puts it at `placement` beside the main screen.
-fn arrange(output: &str, width: u32, height: u32, placement: Placement) {
-    // The main screen is the one at the desktop's origin.
-    let main = monitors().into_iter().map(|(_, r)| r).find(|r| r.left == 0 && r.top == 0);
+/// remembered another) and puts it at `placement` beside `beside` (or the main display).
+fn arrange(output: &str, width: u32, height: u32, placement: Placement, beside: Option<&str>) {
+    let all = monitors();
+    let main = match beside.and_then(|b| all.iter().find(|(n, _)| n == b)) {
+        Some((_, r)) => Some(*r),
+        None => all.iter().map(|(_, r)| *r).find(|r| r.left == 0 && r.top == 0),
+    };
     let (w, h) = (width as i32, height as i32);
     let position = main.map(|m| match placement {
         Placement::Right => (m.right, m.top),
@@ -310,37 +439,62 @@ impl Drop for SharedFrames {
 
 impl super::Source for VirtualSource {
     fn capture(&mut self, out: &mut Vec<u8>) -> Result<(u32, u32)> {
-        match self.frames.as_ref().and_then(|f| f.read(out)) {
+        let plugged = &mut self.plugged;
+        let mut frame = plugged.frames.as_ref().and_then(|f| f.read(out));
+        // Windows draws a new monitor's first frame within moments; the screen read with GDI
+        // meanwhile is black.
+        if frame.is_none() && !self.from_driver && plugged.frames.is_some() {
+            let started = Instant::now();
+            while frame.is_none() && started.elapsed() < Duration::from_secs(2) {
+                thread::sleep(Duration::from_millis(20));
+                frame = plugged.frames.as_ref().and_then(|f| f.read(out));
+            }
+        }
+        match frame {
             Some(size) => {
                 if !self.from_driver {
-                    tracing::info!("frames for {} come from the display driver", self.output);
+                    tracing::info!("frames for {} come from the display driver", plugged.output);
                     self.from_driver = true;
                 }
                 self.last = size;
             }
             // Between frames being written: the last one stays.
             None if self.from_driver => out.resize(self.last.0 as usize * self.last.1 as usize * 4, 0),
-            None => self.last = self.screen.capture(out)?,
+            None => self.last = plugged.screen.capture(out)?,
         }
         Ok(self.last)
     }
 
-    /// The monitor is offered in the new size only, and switched to it.
+    /// A monitor of the new size replaces this one. Windows only reads a monitor's modes
+    /// when it's plugged in: changing them afterwards makes it turn the monitor off.
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        self.driver.ioctl(IOCTL_RESIZE, &[self.id, width, height]).context("the display driver didn't resize")?;
-        arrange(&self.output, width, height, self.placement);
+        let plugged = Plugged::new(&self.driver, width, height)?;
+        *self.input_output.lock().unwrap() = plugged.output.clone();
+        mem::replace(&mut self.plugged, plugged).unplug(&self.driver);
+        // Placed once the old one is gone: while both were there, Windows moved it aside.
+        self.place(width, height);
+        self.from_driver = false;
         Ok(())
     }
 
     fn input(&mut self) -> Option<mpsc::Sender<InputEvent>> {
-        super::windows::input(self.output.clone())
+        super::windows::input(self.input_output.clone())
     }
 }
 
 impl Drop for VirtualSource {
     fn drop(&mut self) {
-        if let Err(e) = self.driver.ioctl(IOCTL_REMOVE, &[self.id]) {
-            tracing::warn!("removing virtual display {}: {e}", self.output);
+        // The main display goes back first, so Windows doesn't pick one.
+        if self.main
+            && let Some(previous) = &self.previous_main
+            && main_display().as_ref() != Some(previous)
+        {
+            make_main(previous);
+        }
+        // No ping after the remove.
+        self.plugged._pinging = mpsc::channel().0;
+        if let Err(e) = self.driver.ioctl(IOCTL_REMOVE, &[self.plugged.id]) {
+            tracing::warn!("removing virtual display {}: {e}", self.plugged.output);
         }
     }
 }

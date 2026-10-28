@@ -92,6 +92,12 @@ impl Connect {
                         ui.label(RichText::new("Of the other computer's main screen (Windows; elsewhere its display settings decide).").small().weak());
                     });
                     ui.end_row();
+                    ui.label("Main display");
+                    ui.vertical(|ui| {
+                        ui.checkbox(&mut settings.main_display, "Make this screen the main display");
+                        ui.label(RichText::new("Programs open on it, with the main taskbar, until it closes (Windows).").small().weak());
+                    });
+                    ui.end_row();
                 }
             });
             ui.add_space(6.0);
@@ -210,7 +216,7 @@ impl Connect {
     fn start_at(&mut self, address: &str, token: &str, [width, height]: [u32; 2], settings: &Settings, ctx: &egui::Context) {
         self.error = None;
         let (address, token, (fps, quality)) = (address.to_string(), token.to_string(), settings.preset.fps_quality());
-        let (mode, placement) = (settings.mode, settings.placement);
+        let (mode, placement, main_display) = (settings.mode, settings.placement, settings.main_display);
         let (done, starting) = mpsc::channel();
         self.starting = Some((address.clone(), starting));
         let ctx = ctx.clone();
@@ -225,7 +231,7 @@ impl Connect {
                             bail!("That computer can't add a display: {}", sources.virtual_detail);
                         }
                         let name = Some(format!("{host}'s screen"));
-                        MonitorSpec { name, width, height, fps, quality, source: SourceSpec::Virtual, placement }
+                        MonitorSpec { name, width, height, fps, quality, source: SourceSpec::Virtual, placement, main_display }
                     }
                     Mode::Mirror => {
                         // Its main screen is listed first.
@@ -234,7 +240,7 @@ impl Connect {
                         };
                         let (name, output) = (Some(format!("{host} (mirror)")), Some(main.name.clone()));
                         let (width, height) = (main.width, main.height);
-                        MonitorSpec { name, width, height, fps, quality, source: SourceSpec::Screen { output }, placement }
+                        MonitorSpec { name, width, height, fps, quality, source: SourceSpec::Screen { output }, placement, main_display: false }
                     }
                 };
                 Ok((target.clone(), target.create(&spec)?))
