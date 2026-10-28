@@ -58,7 +58,8 @@ $includes = @("$c\Include\wdf\umdf\2.15", "$c\Include\$sdk\um\iddcx\1.2", $here,
 $libs = @("$c\Lib\wdf\umdf\x64\2.15", "$c\Lib\$sdk\um\x64\iddcx\1.2", "$c\Lib\$sdk\um\x64")
 
 $defines = "UMDF_VERSION_MAJOR=2", "UMDF_VERSION_MINOR=15", "UMDF_USING_NTSTATUS", "UNICODE", "_UNICODE"
-$clArgs = @("/nologo", "/c", "/std:c++17", "/EHsc", "/O2", "/MT", "/W4", "/WX", "/GS", "/guard:cf",
+# C4324: padding in the WDK's own headers (WDK projects turn it off too).
+$clArgs = @("/nologo", "/c", "/std:c++17", "/EHsc", "/O2", "/MT", "/W4", "/WX", "/wd4324", "/GS", "/guard:cf",
             "/Fo$build\", "$here\demirror_idd.cpp")
 $clArgs += $defines | ForEach-Object { "/D$_" }
 $clArgs += $includes | ForEach-Object { "/I$_" }
