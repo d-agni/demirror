@@ -108,6 +108,12 @@
         <button data-value="below">Below</button>
         <span class="note" style="margin:0">of the host's main screen</span>
       </div>
+      <span id="main-display-label" hidden>Main display</span>
+      <div class="choices" id="main-display" hidden>
+        <button data-value="no">No</button>
+        <button data-value="yes" title="Programs open on this screen, with the main taskbar, until it closes">Yes</button>
+        <span class="note" style="margin:0">programs open on this screen</span>
+      </div>
     </div>
     <p class="error" id="go-error" style="grid-column: 1 / -1"></p>
   </section>
@@ -188,6 +194,7 @@ const store = (key, value) => { try { localStorage.setItem(key, value); } catch 
 let mode = stored('demirror.mode', 'extend');
 let zoom = Number(stored('demirror.zoom', '1')) || 1;
 let place = stored('demirror.place', 'right');
+let main = stored('demirror.main', 'no');
 
 /** A row of buttons, one pressed: `value` is the pressed one's data-value. */
 function choices(id, value, changed) {
@@ -216,6 +223,7 @@ function showDevice() {
   $('#mirror-screen').hidden = !mirror;
   const placeable = !mirror && !!sources?.can_place;
   $('#place').hidden = $('#place-label').hidden = !placeable;
+  $('#main-display').hidden = $('#main-display-label').hidden = !placeable;
   if (sources) {
     const ok = mirror ? !!m : sources.virtual_available;
     $('#go').disabled = !ok;
@@ -272,7 +280,7 @@ async function start() {
     const m = mirrored();
     const spec = mode === 'mirror'
       ? { name: `${device} (mirror)`, width: m.width, height: m.height, source: { kind: 'screen', output: m.name } }
-      : { name: `${device} screen`, ...deviceSize(), source: { kind: 'virtual' }, placement: place };
+      : { name: `${device} screen`, ...deviceSize(), source: { kind: 'virtual' }, placement: place, main_display: main === 'yes' };
     delete spec.dpr;
     const info = await api('POST', '/api/monitors', { ...spec, ...PRESETS[preset] });
     location.href = withToken(`/view/${info.id}?own=1`);
@@ -366,6 +374,7 @@ $('#create-view').onclick = () => create(true);
 choices('mode', mode, (v) => { mode = v; store('demirror.mode', v); showDevice(); });
 choices('zoom', zoom, (v) => { zoom = Number(v); store('demirror.zoom', v); showDevice(); });
 choices('place', place, (v) => { place = v; store('demirror.place', v); });
+choices('main-display', main, (v) => { main = v; store('demirror.main', v); });
 $('#mirror-screen').onchange = () => { store('demirror.mirror', $('#mirror-screen').value); showDevice(); };
 addEventListener('resize', showDevice);
 showDevice();

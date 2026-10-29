@@ -32,13 +32,33 @@ pub enum InputEvent {
     Wheel { dx: i32, dy: i32 },
     /// A key, by its `KeyboardEvent.code` name.
     Key { code: String, down: bool },
+    /// Finger `id` (0 to `MAX_TOUCHES - 1`, reused once lifted) at (`x`, `y`): a real touch on
+    /// hosts that take them (`MonitorInfo::touch`), so the host's programs scroll, zoom and
+    /// press-and-hold as on a touchscreen.
+    Touch { id: u8, phase: TouchPhase, x: f32, y: f32 },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TouchPhase {
+    Down,
+    Move,
+    Up,
+    /// The finger left without meaning to (the browser took the gesture): no tap.
+    Cancel,
+}
+
+/// Fingers at once.
+pub const MAX_TOUCHES: u8 = 10;
 
 impl InputEvent {
     /// Whether the event makes sense (positions inside the picture, a known key).
     pub fn is_valid(&self) -> bool {
         match self {
             InputEvent::Move { x, y } => (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y),
+            InputEvent::Touch { id, x, y, .. } => {
+                *id < MAX_TOUCHES && (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y)
+            }
             InputEvent::Button { .. } => true,
             InputEvent::Wheel { dx, dy } => dx.abs() <= 120 * 50 && dy.abs() <= 120 * 50,
             InputEvent::Key { code, .. } => evdev_key(code).is_some(),
@@ -224,5 +244,10 @@ mod tests {
         assert!(!InputEvent::Key { code: "Nope".into(), down: true }.is_valid());
         assert!(!InputEvent::Move { x: 1.5, y: 0.0 }.is_valid());
         assert!(InputEvent::Wheel { dx: 0, dy: -240 }.is_valid());
+        let m: ClientMessage = serde_json::from_str(r#"{"input":{"t":"touch","id":1,"phase":"down","x":0.5,"y":1.0}}"#).unwrap();
+        assert_eq!(m.input, InputEvent::Touch { id: 1, phase: TouchPhase::Down, x: 0.5, y: 1.0 });
+        assert!(m.input.is_valid());
+        assert!(!InputEvent::Touch { id: MAX_TOUCHES, phase: TouchPhase::Move, x: 0.5, y: 0.5 }.is_valid());
+        assert!(!InputEvent::Touch { id: 0, phase: TouchPhase::Up, x: -0.1, y: 0.5 }.is_valid());
     }
 }

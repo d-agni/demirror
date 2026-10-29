@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.1 - 2026-10-29
+
+### Fixed
+- Windows: a monitor went black once the viewer sent its screen size. Changing a monitor's
+  modes made Windows turn it off; a resize now plugs in a monitor of the new size in its
+  place, at the same position.
+- Windows: the first frame of a new monitor was black; demirror now waits for the driver's.
+- Windows: with **Main display** off, the host's own screen stays the main one, even where
+  Windows remembered the demirror screen as main.
+- A browser on the host itself only watches: its pointer over the picture pulled the host's
+  pointer onto the monitor and kept it there.
+- Building the driver works where `cl` is on PATH outside a developer prompt, and where the
+  Windows SDK has no `signtool` (it's then fetched from NuGet).
+
+### Added
+- **Touchscreen** (Windows hosts): a phone's or tablet's fingers are Windows' own touch
+  (`InjectTouchInput`), so programs scroll, flick, pinch-zoom and press-and-hold as on a
+  touch laptop, with up to 10 fingers. It's the new default; the Touch button still
+  switches to **mouse** (formerly "direct") or **trackpad**. Fingers left down when a viewer
+  disconnects are lifted.
+- **Main display** (Windows hosts): the new screen becomes the main display while it's on,
+  so programs open on it; the host's own screen is the main one again when it closes.
+- CI signs the Windows programs, installer and uninstaller with the repository's
+  code-signing certificate (`DEMIRROR_SIGN_PFX`), when it has one.
+
 ## 0.3.0 - 2026-10-28
 
 ### Fixed

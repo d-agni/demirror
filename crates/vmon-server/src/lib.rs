@@ -65,7 +65,8 @@ impl Server {
                     Ok(listener) => listener,
                     Err(e) => return tracing::error!("listener: {e}"),
                 };
-                let served = axum::serve(listener, web::router(app)).with_graceful_shutdown(async {
+                let service = web::router(app).into_make_service_with_connect_info::<SocketAddr>();
+                let served = axum::serve(listener, service).with_graceful_shutdown(async {
                     let _ = stopped.await;
                 });
                 if let Err(e) = served.await {

@@ -121,6 +121,7 @@ function connect() {
       canvas.classList.toggle('control', !!info.input);
       document.getElementById('keyboard').hidden = !info.input;
       touchButton.hidden = !info.input || !matchMedia('(any-pointer: coarse)').matches;
+      showTouchMode();
       return;
     }
     status.textContent = '';
@@ -209,16 +210,66 @@ canvas.addEventListener('wheel', (e) => {
   if (dx || dy) { flushMove(); send({ t: 'wheel', dx, dy }); }
 }, { passive: false });
 
-// Touch, two ways (the Touch button switches, remembered on this device):
-// - direct, like a touchscreen: tap = click there, drag = drag, long press = right click;
+// Touch, three ways (the Touch button switches, remembered on this device):
+// - touchscreen, where the host takes touch (info.touch): fingers are the host's own touch,
+//   so its programs scroll, zoom, flick and press-and-hold as on a touchscreen;
+// - mouse: tap = click there, drag = drag, long press = right click;
 // - trackpad, like a laptop's: a finger moves the pointer (faster the faster it moves),
 //   tap = click where the pointer is, long press then move = drag.
-// Both: two-finger tap = right click, two-finger drag = scroll.
+// Mouse and trackpad: two-finger tap = right click, two-finger drag = scroll.
 const touchButton = document.getElementById('touchmode');
-let trackpad = stored('demirror.touch', 'direct') === 'trackpad';
-function showTouchMode() { touchButton.textContent = trackpad ? 'Touch: trackpad' : 'Touch: direct'; }
-touchButton.onclick = () => { trackpad = !trackpad; store('demirror.touch', trackpad ? 'trackpad' : 'direct'); showTouchMode(); };
+const TOUCH_LABELS = { touchscreen: 'Touch: touchscreen', direct: 'Touch: mouse', trackpad: 'Touch: trackpad' };
+let touchMode = stored('demirror.touchmode', 'touchscreen');
+if (!TOUCH_LABELS[touchMode]) touchMode = 'touchscreen';
+const modes = () => (info?.touch ? ['touchscreen', 'direct', 'trackpad'] : ['direct', 'trackpad']);
+/** The mode in use: touchscreen falls back to mouse where the host can't take touch. */
+const currentMode = () => (modes().includes(touchMode) ? touchMode : 'direct');
+let trackpad = false, native = false;
+function showTouchMode() {
+  const mode = currentMode();
+  trackpad = mode === 'trackpad';
+  native = mode === 'touchscreen';
+  touchButton.textContent = TOUCH_LABELS[mode];
+}
+touchButton.onclick = () => {
+  const list = modes();
+  touchMode = list[(list.indexOf(currentMode()) + 1) % list.length];
+  store('demirror.touchmode', touchMode);
+  showTouchMode();
+};
 showTouchMode();
+
+// Touchscreen: each finger in a slot (0-9) while it's down; moves go out once a frame.
+const slots = new Map(); // pointerId -> slot
+const pendingTouches = new Map(); // slot -> position
+function flushTouches() {
+  for (const [id, p] of pendingTouches) send({ t: 'touch', id, phase: 'move', ...p });
+  pendingTouches.clear();
+}
+function touchDown(e) {
+  const used = new Set(slots.values());
+  let id = 0;
+  while (used.has(id)) id++;
+  if (id > 9) return;
+  slots.set(e.pointerId, id);
+  canvas.setPointerCapture(e.pointerId);
+  flushTouches();
+  send({ t: 'touch', id, phase: 'down', ...toPicture(e.clientX, e.clientY) });
+}
+function touchMove(e) {
+  const id = slots.get(e.pointerId);
+  if (id === undefined) return;
+  if (!pendingTouches.size) requestAnimationFrame(flushTouches);
+  pendingTouches.set(id, toPicture(e.clientX, e.clientY));
+}
+function touchLift(e) {
+  const id = slots.get(e.pointerId);
+  if (id === undefined) return;
+  slots.delete(e.pointerId);
+  flushTouches();
+  const phase = e.type === 'pointercancel' ? 'cancel' : 'up';
+  send({ t: 'touch', id, phase, ...toPicture(e.clientX, e.clientY) });
+}
 
 // Where the host's pointer is (fractions of the picture), for trackpad moves.
 let pointer = { x: 0.5, y: 0.5 };
@@ -240,6 +291,7 @@ let gesture = null;
 canvas.addEventListener('pointerdown', (e) => {
   if (e.pointerType !== 'touch') return;
   e.preventDefault();
+  if (native) return touchDown(e);
   touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (touches.size === 1) {
     gesture = { kind: 'one', x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, t: performance.now(),
@@ -260,6 +312,7 @@ canvas.addEventListener('pointerdown', (e) => {
   }
 });
 canvas.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch' && slots.has(e.pointerId)) return touchMove(e);
   if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
   touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (gesture?.kind === 'one' && !gesture.done) {
@@ -284,6 +337,7 @@ canvas.addEventListener('pointermove', (e) => {
   }
 });
 function touchEnd(e) {
+  if (e.pointerType === 'touch' && slots.has(e.pointerId)) return touchLift(e);
   if (e.pointerType !== 'touch' || !touches.has(e.pointerId)) return;
   touches.delete(e.pointerId);
   if (gesture?.kind === 'one') {

@@ -34,6 +34,11 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
+#ifdef Sign
+; iscc /DSign /Sdemirror="<command> $f": the installer and uninstaller get signed.
+SignTool=demirror
+SignedUninstaller=yes
+#endif
 
 [Tasks]
 Name: "driver"; Description: "Install the display driver: devices extend the desktop like real monitors"

@@ -83,6 +83,7 @@ impl MonitorManager {
     fn shown_info(&self, monitor: &Monitor) -> MonitorInfo {
         let mut info = monitor.current_info();
         info.input &= self.allow_input();
+        info.touch &= info.input;
         info
     }
 
@@ -176,6 +177,7 @@ impl MonitorManager {
             source: spec.source,
             viewers: 0,
             input: input.is_some(),
+            touch: input.is_some() && crate::source::takes_touch(),
         };
         tracing::info!(id, name = info.name, width, height, "monitor created");
         self.monitors.lock().insert(
@@ -295,7 +297,7 @@ fn capture_loop(id: u32, spec: MonitorSpec, shared: Shared, ready: mpsc::Sender<
         let mut source: Box<dyn Source> = match &spec.source {
             SourceSpec::Synthetic => Box::new(Synthetic::new(id, spec.width, spec.height)),
             SourceSpec::Screen { output } => source::open_screen(output.as_deref())?,
-            SourceSpec::Virtual => source::open_virtual(spec.width, spec.height, spec.placement)?,
+            SourceSpec::Virtual => source::open_virtual(spec.width, spec.height, spec.placement, spec.main_display)?,
         };
         let (w, h) = source.capture(&mut pixels)?;
         frames.send_replace(Some(encode(&pixels, w, h, spec.quality)?));

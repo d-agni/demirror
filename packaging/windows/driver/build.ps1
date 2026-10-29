@@ -19,7 +19,8 @@ $here = $PSScriptRoot
 $wdkVersion = "10.0.26100.6584"
 
 # Outside a developer prompt, set one up from the installed Visual Studio (or Build Tools).
-if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
+# cl alone on PATH isn't enough: it needs the prompt's INCLUDE and LIB too.
+if (-not (Get-Command cl -ErrorAction SilentlyContinue) -or -not $env:INCLUDE -or -not $env:LIB) {
     $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $vs) { throw "Visual Studio with the C++ tools is needed" }
@@ -27,10 +28,24 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
         if ($_ -match "^([^=]+)=(.*)$") { Set-Item "env:$($Matches[1])" $Matches[2] }
     }
 }
-foreach ($tool in "cl", "link", "signtool") {
+foreach ($tool in "cl", "link") {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "$tool not found: run from a Visual Studio x64 developer prompt"
     }
+}
+
+# signtool comes with the SDK's signing tools, which not every install has: else from NuGet.
+if (-not (Get-Command signtool -ErrorAction SilentlyContinue)) {
+    $tools = Join-Path $env:TEMP "demirror-sdk-buildtools-$wdkVersion"
+    if (-not (Test-Path "$tools\bin")) {
+        New-Item -ItemType Directory -Force $tools | Out-Null
+        Invoke-WebRequest -UseBasicParsing -OutFile "$tools\tools.zip" `
+            "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/$wdkVersion/microsoft.windows.sdk.buildtools.$wdkVersion.nupkg"
+        Expand-Archive -Force "$tools\tools.zip" $tools
+    }
+    $signtool = Get-ChildItem -Recurse "$tools\bin" -Filter signtool.exe | Where-Object FullName -like "*\x64\*" | Select-Object -First 1
+    if (-not $signtool) { throw "signtool.exe not found" }
+    $env:PATH = "$($signtool.DirectoryName);$env:PATH"
 }
 
 # The WDK, from NuGet.

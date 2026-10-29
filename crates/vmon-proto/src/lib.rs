@@ -45,6 +45,10 @@ pub struct MonitorSpec {
     /// lets demirror choose (`SourcesInfo::can_place`).
     #[serde(default)]
     pub placement: Placement,
+    /// A new virtual display becomes the host's main display while it's on: programs open
+    /// on it, and its taskbar is the main one. Followed where `SourcesInfo::can_place`.
+    #[serde(default)]
+    pub main_display: bool,
 }
 
 /// Where a new virtual display goes, next to the host's main screen.
@@ -84,6 +88,7 @@ impl Default for MonitorSpec {
             quality: default_quality(),
             source: default_source(),
             placement: Placement::default(),
+            main_display: false,
         }
     }
 }
@@ -112,6 +117,9 @@ pub struct MonitorInfo {
     /// Viewers may control the host through this monitor (pointer, keys).
     #[serde(default)]
     pub input: bool,
+    /// Fingers on the viewer are the host's touch (`InputEvent::Touch`), not a mouse.
+    #[serde(default)]
+    pub touch: bool,
 }
 
 /// A screen the server can capture.
@@ -135,7 +143,8 @@ pub struct SourcesInfo {
     pub virtual_available: bool,
     /// Which virtual display driver is used, or why none is available.
     pub virtual_detail: String,
-    /// `MonitorSpec::placement` is followed (Windows; on Linux the desktop arranges).
+    /// `MonitorSpec::placement` and `main_display` are followed (Windows; on Linux the
+    /// desktop arranges).
     #[serde(default)]
     pub can_place: bool,
 }
@@ -221,8 +230,10 @@ mod tests {
         assert_eq!((spec.width, spec.height, spec.fps), (800, 720, 30));
         assert_eq!(spec.source, SourceSpec::Synthetic);
         assert_eq!(spec.placement, Placement::Right);
-        let spec: MonitorSpec = serde_json::from_str(r#"{"placement":"above"}"#).unwrap();
+        assert!(!spec.main_display);
+        let spec: MonitorSpec = serde_json::from_str(r#"{"placement":"above","main_display":true}"#).unwrap();
         assert_eq!(spec.placement, Placement::Above);
+        assert!(spec.main_display);
     }
 
     #[test]

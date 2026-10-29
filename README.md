@@ -49,13 +49,16 @@ full screen. Rotate the device or resize the window and the monitor follows.
   pixels, shown bigger, so text on a small phone is readable.
 - **Position** (Windows hosts): whether the new screen sits left, right, above or below the
   host's main screen. Elsewhere, arrange it in the desktop's display settings.
+- **Main display** (Windows hosts): the new screen becomes the host's main display while
+  it's on, so programs open on it and the main taskbar is there. When the monitor closes,
+  the host's own screen is the main display again.
 
 The choices are remembered on the device.
 
 **On another computer:** open **demirror**, page **Use as monitor**. Computers sharing
 on the network are listed by themselves, each with its own **Start monitor** (or
-connect by address), with the same **Mode**, **Quality**, **Text size** and **Position**
-choices (Mirror shows the other computer's main screen); the monitor's size is shown
+connect by address), with the same **Mode**, **Quality**, **Text size**, **Position** and
+**Main display** choices (Mirror shows the other computer's main screen); the monitor's size is shown
 before it starts, and it opens full screen. Esc or **Disconnect** ends it,
 double-click switches between full screen and a window.
 
@@ -64,7 +67,14 @@ control it, a token, the port, **Share when demirror opens**, and **Open demirro
 log in** (Linux and Windows).
 
 **Control the host from the device.** Touch, mouse and keyboard on the viewing
-device work the computer, like a touchscreen monitor:
+device work the computer, like a touchscreen monitor.
+
+On a Windows host, a phone or tablet is a real **touchscreen**: your fingers are
+Windows' own touch, so programs react as on a touch laptop. Drag to scroll (with
+flicks and momentum), pinch to zoom, tap to click, press and hold for the right-click
+menu, and use several fingers at once.
+
+Elsewhere, and in the Touch button's **mouse** mode, touch works the pointer:
 
 | on the device | on the host |
 |---|---|
@@ -74,10 +84,9 @@ device work the computer, like a touchscreen monitor:
 | two-finger drag / mouse wheel | scroll |
 | keys (a hardware keyboard, or **Keyboard** on a phone) | the same keys |
 
-A phone or tablet's **Touch** button switches touch to **trackpad**, like a laptop's:
-a finger moves the pointer (faster the faster it moves), a tap clicks where the pointer
-is, and a long press then moving drags. Two fingers work as above. The choice is
-remembered on the device.
+The **Touch** button also has **trackpad**, like a laptop's: a finger moves the pointer
+(faster the faster it moves), a tap clicks where the pointer is, and a long press then
+moving drags. Two fingers work as in mouse mode. The choice is remembered on the device.
 
 **Size.** A monitor has the viewing screen's shape, held upright or sideways, so it fills
 the screen. Its pixels are the screen's, but the quality preset caps the longest side
@@ -139,8 +148,9 @@ the driver plugs in a monitor of exactly that device's size, Windows extends the
 onto it (it shows up in **Settings → Display** as *demirror*, where you can arrange it like
 any monitor), and the driver hands demirror each frame Windows draws for it, through
 shared memory, to stream to the device. Touch, mouse and keyboard from the device work on
-it (and on a mirrored screen). When the device disconnects, or demirror quits or crashes,
-the monitor is unplugged.
+it (and on a mirrored screen). A browser on the host itself only watches: its pointer
+would otherwise pull the host's pointer onto the monitor. When the device disconnects, or
+demirror quits or crashes, the monitor is unplugged.
 
 If something goes wrong, the app's log is `%LOCALAPPDATA%\demirror\demirror.log`
 (the path is also under **Settings → About**).
@@ -153,6 +163,14 @@ certificates (*Trusted Root* and *Trusted Publishers*), and uninstalling demirro
 it again. Test-signing mode and turning off Secure Boot are not needed. To sign with a
 real certificate, put it in the repository's `DEMIRROR_SIGN_PFX` (base64 .pfx) and
 `DEMIRROR_SIGN_PASSWORD` secrets; the build then uses it and ships no certificate.
+
+The same secrets sign the programs (`demirror.exe`, `vmon-server.exe`, `vmon-client.exe`),
+the installer and its uninstaller ([packaging/windows/sign.ps1](packaging/windows/sign.ps1)).
+Without them the programs are unsigned: Windows SmartScreen warns about them, and
+Defender's machine-learning checks can flag `demirror.exe` (it installs a driver and a
+certificate, changes the firewall and injects input, as malware also does). A self-signed
+certificate doesn't help with either; one from a code-signing authority (or Azure Trusted
+Signing, or SignPath for open-source projects) does.
 
 To build the driver yourself (Visual Studio with the C++ tools; the Windows Driver Kit
 comes from NuGet):
